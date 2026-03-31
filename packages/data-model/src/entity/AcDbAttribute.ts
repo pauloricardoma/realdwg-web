@@ -20,6 +20,10 @@ export class AcDbAttribute extends AcDbText {
   /** The DXF entity type name. */
   static override typeName: string = 'Attrib'
 
+  override get dxfTypeName() {
+    return 'ATTRIB'
+  }
+
   /**
    * Attribute behavior flags.
    * @see AcDbAttributeFlags
@@ -263,6 +267,12 @@ export class AcDbAttribute extends AcDbText {
     this.isMTextAttribute = value != null
   }
 
+  /**
+   * Writes DXF fields for this object.
+   *
+   * @param filer - DXF output writer.
+   * @returns The instance (for chaining).
+   */
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
     filer.writeSubclassMarker('AcDbAttribute')

@@ -53,6 +53,10 @@ export abstract class AcDbDimension extends AcDbEntity {
   /** The entity type name */
   static override typeName: string = 'Dimension'
 
+  override get dxfTypeName() {
+    return 'DIMENSION'
+  }
+
   /** The block table record ID containing the dimension entities */
   private _dimBlockId: string | null
   /** The relative position point of the block referenced by the dimension (in WCS coordinates). */
@@ -613,6 +617,12 @@ export abstract class AcDbDimension extends AcDbEntity {
     return new AcGeMatrix3d().multiplyMatrices(mInsert, mBase)
   }
 
+  /**
+   * Writes DXF fields for this object.
+   *
+   * @param filer - DXF output writer.
+   * @returns The instance (for chaining).
+   */
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
     const dimStyle =

@@ -47,6 +47,7 @@ export class AcDbDictionary<
   constructor(db: AcDbDatabase) {
     super()
     this.database = db
+    this.objectId = db.generateHandle()
     this._recordsByName = new Map<string, TObjectType>()
     this._recordsById = new Map<string, TObjectType>()
   }
@@ -84,6 +85,9 @@ export class AcDbDictionary<
   setAt(key: string, value: TObjectType) {
     value.database = this.database
     value.ownerId = this.objectId
+
+    this.database.commitObjectHandle(value, id => this.hasId(id))
+
     this._recordsByName.set(key, value)
     this._recordsById.set(value.objectId, value)
     this.database.events.dictObjetSet.dispatch({
@@ -264,9 +268,19 @@ export class AcDbDictionary<
     return this._recordsByName.entries()
   }
 
+  /**
+   * Writes DXF fields for this object.
+   *
+   * @param filer - DXF output writer.
+   * @returns The instance (for chaining).
+   */
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
     filer.writeSubclassMarker('AcDbDictionary')
+    // 280 Hard-owner flag. If set to 1, indicates that elements of the dictionary are to
+    // be treated as hard-owned
+    // TODO: Different dictionary may have different value
+    filer.writeInt16(280, 1)
     filer.writeInt16(281, 1)
     for (const [key, value] of this._recordsByName) {
       filer.writeString(3, key)

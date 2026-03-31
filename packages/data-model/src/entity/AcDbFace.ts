@@ -20,6 +20,10 @@ export class AcDbFace extends AcDbEntity {
   /** The entity type name */
   static override typeName: string = 'Face'
 
+  override get dxfTypeName() {
+    return '3DFACE'
+  }
+
   /** The three or four vertices of the face */
   private _vertices: AcGePoint3d[]
   /** The invisibility of the edges of the face */
@@ -235,6 +239,12 @@ export class AcDbFace extends AcDbEntity {
     return renderer.lineSegments(buffer, 3, indices)
   }
 
+  /**
+   * Writes DXF fields for this object.
+   *
+   * @param filer - DXF output writer.
+   * @returns The instance (for chaining).
+   */
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
     const p0 = this.getVertexAt(0)

@@ -41,6 +41,10 @@ export class AcDbTrace extends AcDbCurve {
   /** The entity type name */
   static override typeName: string = 'Trace'
 
+  override get dxfTypeName() {
+    return 'TRACE'
+  }
+
   /** The elevation (Z-coordinate) of the trace plane */
   private _elevation: number
   /** The four vertices of the trace */
@@ -281,6 +285,12 @@ export class AcDbTrace extends AcDbCurve {
     return renderer.area(area)
   }
 
+  /**
+   * Writes DXF fields for this object.
+   *
+   * @param filer - DXF output writer.
+   * @returns The instance (for chaining).
+   */
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
     filer.writeSubclassMarker('AcDbTrace')

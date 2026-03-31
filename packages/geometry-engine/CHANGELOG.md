@@ -1,5 +1,37 @@
 # @mlightcad/geometry-engine
 
+## 3.2.12
+
+### Patch Changes
+
+- fix: upgrade dxf-json to fix bug #132 in cad-viewer repo
+- Updated dependencies
+  - @mlightcad/common@1.4.12
+
+## 3.2.11
+
+### Patch Changes
+
+- fix issue on converting spline with fit points
+- Updated dependencies
+  - @mlightcad/common@1.4.11
+
+## 3.2.10
+
+### Patch Changes
+
+- fix: fix bugs on building loops for hatch and revome dependency on verb-nurbs
+- Updated dependencies
+  - @mlightcad/common@1.4.10
+
+## 3.2.9
+
+### Patch Changes
+
+- feat: improve DXF export
+- Updated dependencies
+  - @mlightcad/common@1.4.9
+
 ## 3.2.8
 
 ### Patch Changes

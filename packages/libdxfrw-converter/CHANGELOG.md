@@ -1,5 +1,37 @@
 # @mlightcad/libdxfrw-converter
 
+## 3.5.12
+
+### Patch Changes
+
+- fix: upgrade dxf-json to fix bug #132 in cad-viewer repo
+- Updated dependencies
+  - @mlightcad/data-model@1.7.12
+
+## 3.5.11
+
+### Patch Changes
+
+- fix issue on converting spline with fit points
+- Updated dependencies
+  - @mlightcad/data-model@1.7.11
+
+## 3.5.10
+
+### Patch Changes
+
+- fix: fix bugs on building loops for hatch and revome dependency on verb-nurbs
+- Updated dependencies
+  - @mlightcad/data-model@1.7.10
+
+## 3.5.9
+
+### Patch Changes
+
+- feat: improve DXF export
+- Updated dependencies
+  - @mlightcad/data-model@1.7.9
+
 ## 3.5.8
 
 ### Patch Changes

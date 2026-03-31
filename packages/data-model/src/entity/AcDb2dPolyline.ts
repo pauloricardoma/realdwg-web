@@ -53,6 +53,10 @@ export class AcDb2dPolyline extends AcDbCurve {
   /** The entity type name */
   static override typeName: string = '2dPolyline'
 
+  override get dxfTypeName() {
+    return 'POLYLINE'
+  }
+
   /** The curve/spline-fit type for this 2d polyline */
   private _polyType: AcDbPoly2dType
   /** The elevation (Z-coordinate) of the polyline plane */
@@ -174,6 +178,17 @@ export class AcDb2dPolyline extends AcDbCurve {
 
   getPointAt(index: number) {
     return this._geo.getPointAt(index)
+  }
+
+  /**
+   * Gets the bulge value of the vertex at the specified index.
+   *
+   * @param index - The index of the vertex
+   * @returns The bulge value of the vertex
+   */
+  getBulgeAt(index: number): number {
+    const vertex = this._geo.vertices[index]
+    return vertex?.bulge || 0
   }
 
   /**
@@ -339,6 +354,58 @@ export class AcDb2dPolyline extends AcDbCurve {
     return renderer.lines(points)
   }
 
+  /**
+   * Writes the DXF record for the polyline, plus legacy VERTEX/SEQEND records.
+   *
+   * The extra records are required by the classic POLYLINE entity format.
+   *
+   * @param filer - DXF output writer.
+   * @param allXdata - When true, emits all XData attached to this entity.
+   * @returns The entity instance (for chaining).
+   */
+  /**
+   * Writes this object to the DXF output.
+   *
+   * @param filer - DXF output writer.
+   * @param allXdata - When true, emits all XData attached to this object.
+   * @returns The instance (for chaining).
+   */
+  override dxfOut(filer: AcDbDxfFiler, allXdata = false) {
+    super.dxfOut(filer, allXdata)
+    for (let i = 0; i < this.numberOfVertices; ++i) {
+      filer.writeStart('VERTEX')
+      filer.writeHandle(5, this.database.generateHandle())
+      filer.writeObjectId(330, this.objectId)
+      filer.writeSubclassMarker('AcDbEntity')
+      filer.writeSubclassMarker('AcDbVertex')
+      filer.writeSubclassMarker('AcDb2dVertex')
+      filer.writePoint3d(10, {
+        x: this.getPointAt(i).x,
+        y: this.getPointAt(i).y,
+        z: this.elevation
+      })
+      filer.writeDouble(42, this.getBulgeAt(i))
+      filer.writeInt16(70, 0)
+    }
+    filer.writeStart('SEQEND')
+    filer.writeHandle(5, this.database.generateHandle())
+    filer.writeObjectId(330, this.objectId)
+    filer.writeSubclassMarker('AcDbEntity')
+    return this
+  }
+
+  /**
+   * Writes the POLYLINE entity fields (header) for a 2D polyline.
+   *
+   * @param filer - DXF output writer.
+   * @returns The entity instance (for chaining).
+   */
+  /**
+   * Writes DXF fields for this object.
+   *
+   * @param filer - DXF output writer.
+   * @returns The instance (for chaining).
+   */
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
     filer.writeSubclassMarker('AcDb2dPolyline')
@@ -348,7 +415,10 @@ export class AcDb2dPolyline extends AcDbCurve {
     if (this.polyType === AcDbPoly2dType.CubicSplinePoly) flag |= 8
     filer.writeInt16(66, this.numberOfVertices > 0 ? 1 : 0)
     filer.writeInt16(70, flag)
-    filer.writeDouble(38, this.elevation)
+    // Legacy POLYLINE stores elevation at group code 30 with dummy 10/20 values.
+    filer.writeDouble(10, 0)
+    filer.writeDouble(20, 0)
+    filer.writeDouble(30, this.elevation)
     return this
   }
 }

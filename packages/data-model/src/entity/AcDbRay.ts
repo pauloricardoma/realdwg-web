@@ -34,6 +34,10 @@ export class AcDbRay extends AcDbCurve {
   /** The entity type name */
   static override typeName: string = 'Ray'
 
+  override get dxfTypeName() {
+    return 'RAY'
+  }
+
   /** The base point of the ray */
   private _basePoint: AcGePoint3d
   /** The unit direction vector of the ray */
@@ -313,6 +317,12 @@ export class AcDbRay extends AcDbCurve {
     return renderer.lines(points)
   }
 
+  /**
+   * Writes DXF fields for this object.
+   *
+   * @param filer - DXF output writer.
+   * @returns The instance (for chaining).
+   */
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
     filer.writeSubclassMarker('AcDbRay')

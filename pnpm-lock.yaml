@@ -102,8 +102,8 @@ importers:
         specifier: workspace:*
         version: link:../common
       '@mlightcad/dxf-json':
-        specifier: 1.0.10
-        version: 1.0.10
+        specifier: 1.1.2
+        version: 1.1.2
       '@mlightcad/geometry-engine':
         specifier: workspace:*
         version: link:../geometry-engine
@@ -135,9 +135,6 @@ importers:
       '@mlightcad/common':
         specifier: workspace:*
         version: link:../common
-      verb-nurbs-web:
-        specifier: ^2.1.3
-        version: 2.1.3
 
   packages/graphic-interface:
     dependencies:
@@ -163,8 +160,8 @@ importers:
         specifier: workspace:*
         version: link:../data-model
       '@mlightcad/libredwg-web':
-        specifier: 0.6.6
-        version: 0.6.6
+        specifier: 0.6.7
+        version: 0.6.7
     devDependencies:
       vite:
         specifier: ^5.2.10
@@ -1230,8 +1227,8 @@ packages:
     resolution: {integrity: sha512-autAXT203ixhqei9xt+qkYOvY8l6LAFIdT2UXc/RPNeUVfqRF1BV94GTJyVPFKT8nFM6MyVJhjLj9E8JWvf5zQ==}
     engines: {node: ^18.18.0 || ^20.9.0 || >=21.1.0}
 
-  '@fxts/core@1.17.0':
-    resolution: {integrity: sha512-gmcIhJgU6eaW31/W6cdCRi5goJ/nh6zB0mMCxVf4lxx6yFCxX0zMcdThacEhcTkR3G4jLdCUw0Y9Ii7IIEyc0w==}
+  '@fxts/core@1.26.0':
+    resolution: {integrity: sha512-ONaza1CGr8dLKmJ0HQgi0h4XuyDJMr0P70M7o/My/YeeRxuYoSANHjE2nSY7xO4WHgxUD5ojd5dpxlFOzAEJsA==}
 
   '@gerrit0/mini-shiki@1.24.2':
     resolution: {integrity: sha512-kw11jMCKwS5+GMMDy/o7W6C1KwsxgHnPO/RXzNBUw000BzRvUhUSi5zE8D2Qq7/A7bfJysFenEVBHUR7aMSxUQ==}
@@ -1377,14 +1374,14 @@ packages:
   '@manypkg/get-packages@1.1.3':
     resolution: {integrity: sha512-fo+QhuU3qE/2TQMQmbVMqaQ6EWbMhi4ABWP+O4AM1NqPBuy0OrApV5LO6BrrgnhtAHS2NH6RrVk9OL181tTi8A==}
 
-  '@mlightcad/dxf-json@1.0.10':
-    resolution: {integrity: sha512-KY2E49y9DHPb0LoEi2Uz2cgmtVFgiNNNBn1DsWYvqn4VLD7itr2+GE51yBZLAzG1SFXiwqPjp5mprU6fI7kysg==}
+  '@mlightcad/dxf-json@1.1.2':
+    resolution: {integrity: sha512-3kAEfEX+T82/AyChi88lw8ZcLuGjspgA4eaF6Ue7LNrGdtjJppVoKVKsddkGo0/d9AHShyDmzu8IbCXbtx5KMA==}
 
   '@mlightcad/libdxfrw-web@0.0.9':
     resolution: {integrity: sha512-6fqGbjKWwI93cq8vwpXiFdAzWfdJjcIlLuAYwUvgTcEjx5jPvbd+tkzY7mX2/a8iMm/b/auGVzkgf1wxezHYIw==}
 
-  '@mlightcad/libredwg-web@0.6.6':
-    resolution: {integrity: sha512-Xv8uhe0M7etEW3mHDOWYhZx5qqLXLO/702H32bf22J9veQLjjxO33aNQfo37tgQs3CnaxkSMdeRvVrQCQwmigw==}
+  '@mlightcad/libredwg-web@0.6.7':
+    resolution: {integrity: sha512-FWJ3lpqxeMcCUNhOyBME6m8NUTkux1g1LbcrS0RdHFL4pU+Om/laKBkUN8RRY+kK5Arlun8bkkCqf3nw+ZaPag==}
 
   '@nodelib/fs.scandir@2.1.5':
     resolution: {integrity: sha512-vq24Bq3ym5HEQm2NKCr3yXDwjc7vTsEThRDnkp2DK9p1uqLR+DHurm/NOTo0KG7HYHU7eppKZj3MyqYuMBf62g==}
@@ -1453,28 +1450,24 @@ packages:
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@nx/nx-linux-arm64-musl@19.3.1':
     resolution: {integrity: sha512-JMuBbg2Zqdz4N7i+hiJGr2QdsDarDZ8vyzzeoevFq3b8nhZfqKh/lno7+Y0WkXNpH7aT05GHaUA1r1NXf/5BeQ==}
     engines: {node: '>= 10'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@nx/nx-linux-x64-gnu@19.3.1':
     resolution: {integrity: sha512-cVmDMtolaqK7PziWxvjus1nCyj2wMNM+N0/4+rBEjG4v47gTtBxlZJoxK02jApdV+XELehsTjd0Z/xVfO4Rl1Q==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@nx/nx-linux-x64-musl@19.3.1':
     resolution: {integrity: sha512-UGujK/TLMz9TNJ6+6HLhoOV7pdlgPVosSyeNZcoXCHOg/Mg9NGM7Hgk9jDodtcAY+TP6QMDJIMVGuXBsCE7NLQ==}
     engines: {node: '>= 10'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@nx/nx-win32-arm64-msvc@19.3.1':
     resolution: {integrity: sha512-q+2aaRXarh/+HOOW/JXRwEnEEwPdGipsfzXBPDuDDJ7aOYKuyG7g1DlSERKdzI/aEBP+joneZbcbZHaDcEv2xw==}
@@ -1520,42 +1513,36 @@ packages:
     engines: {node: '>= 10.0.0'}
     cpu: [arm]
     os: [linux]
-    libc: [glibc]
 
   '@parcel/watcher-linux-arm-musl@2.5.0':
     resolution: {integrity: sha512-6uHywSIzz8+vi2lAzFeltnYbdHsDm3iIB57d4g5oaB9vKwjb6N6dRIgZMujw4nm5r6v9/BQH0noq6DzHrqr2pA==}
     engines: {node: '>= 10.0.0'}
     cpu: [arm]
     os: [linux]
-    libc: [musl]
 
   '@parcel/watcher-linux-arm64-glibc@2.5.0':
     resolution: {integrity: sha512-BfNjXwZKxBy4WibDb/LDCriWSKLz+jJRL3cM/DllnHH5QUyoiUNEp3GmL80ZqxeumoADfCCP19+qiYiC8gUBjA==}
     engines: {node: '>= 10.0.0'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@parcel/watcher-linux-arm64-musl@2.5.0':
     resolution: {integrity: sha512-S1qARKOphxfiBEkwLUbHjCY9BWPdWnW9j7f7Hb2jPplu8UZ3nes7zpPOW9bkLbHRvWM0WDTsjdOTUgW0xLBN1Q==}
     engines: {node: '>= 10.0.0'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@parcel/watcher-linux-x64-glibc@2.5.0':
     resolution: {integrity: sha512-d9AOkusyXARkFD66S6zlGXyzx5RvY+chTP9Jp0ypSTC9d4lzyRs9ovGf/80VCxjKddcUvnsGwCHWuF2EoPgWjw==}
     engines: {node: '>= 10.0.0'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@parcel/watcher-linux-x64-musl@2.5.0':
     resolution: {integrity: sha512-iqOC+GoTDoFyk/VYSFHwjHhYrk8bljW6zOhPuhi5t9ulqiYq1togGJB5e3PwYVFFfeVgc6pbz3JdQyDoBszVaA==}
     engines: {node: '>= 10.0.0'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@parcel/watcher-win32-arm64@2.5.0':
     resolution: {integrity: sha512-twtft1d+JRNkM5YbmexfcH/N4znDtjgysFaV9zvZmmJezQsKpkfLYJ+JFV3uygugK6AtIM2oADPkB2AdhBrNig==}
@@ -1611,55 +1598,46 @@ packages:
     resolution: {integrity: sha512-C/zbRYRXFjWvz9Z4haRxcTdnkPt1BtCkz+7RtBSuNmKzMzp3ZxdM28Mpccn6pt28/UWUCTXa+b0Mx1k3g6NOMA==}
     cpu: [arm]
     os: [linux]
-    libc: [glibc]
 
   '@rollup/rollup-linux-arm-musleabihf@4.18.0':
     resolution: {integrity: sha512-l3m9ewPgjQSXrUMHg93vt0hYCGnrMOcUpTz6FLtbwljo2HluS4zTXFy2571YQbisTnfTKPZ01u/ukJdQTLGh9A==}
     cpu: [arm]
     os: [linux]
-    libc: [musl]
 
   '@rollup/rollup-linux-arm64-gnu@4.18.0':
     resolution: {integrity: sha512-rJ5D47d8WD7J+7STKdCUAgmQk49xuFrRi9pZkWoRD1UeSMakbcepWXPF8ycChBoAqs1pb2wzvbY6Q33WmN2ftw==}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@rollup/rollup-linux-arm64-musl@4.18.0':
     resolution: {integrity: sha512-be6Yx37b24ZwxQ+wOQXXLZqpq4jTckJhtGlWGZs68TgdKXJgw54lUUoFYrg6Zs/kjzAQwEwYbp8JxZVzZLRepQ==}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@rollup/rollup-linux-powerpc64le-gnu@4.18.0':
     resolution: {integrity: sha512-hNVMQK+qrA9Todu9+wqrXOHxFiD5YmdEi3paj6vP02Kx1hjd2LLYR2eaN7DsEshg09+9uzWi2W18MJDlG0cxJA==}
     cpu: [ppc64]
     os: [linux]
-    libc: [glibc]
 
   '@rollup/rollup-linux-riscv64-gnu@4.18.0':
     resolution: {integrity: sha512-ROCM7i+m1NfdrsmvwSzoxp9HFtmKGHEqu5NNDiZWQtXLA8S5HBCkVvKAxJ8U+CVctHwV2Gb5VUaK7UAkzhDjlg==}
     cpu: [riscv64]
     os: [linux]
-    libc: [glibc]
 
   '@rollup/rollup-linux-s390x-gnu@4.18.0':
     resolution: {integrity: sha512-0UyyRHyDN42QL+NbqevXIIUnKA47A+45WyasO+y2bGJ1mhQrfrtXUpTxCOrfxCR4esV3/RLYyucGVPiUsO8xjg==}
     cpu: [s390x]
     os: [linux]
-    libc: [glibc]
 
   '@rollup/rollup-linux-x64-gnu@4.18.0':
     resolution: {integrity: sha512-xuglR2rBVHA5UsI8h8UbX4VJ470PtGCf5Vpswh7p2ukaqBGFTnsfzxUBetoWBWymHMxbIG0Cmx7Y9qDZzr648w==}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@rollup/rollup-linux-x64-musl@4.18.0':
     resolution: {integrity: sha512-LKaqQL9osY/ir2geuLVvRRs+utWUNilzdE90TpyoX0eNqPzWjRm14oMEE+YLve4k/NAqCdPkGYDaDF5Sw+xBfg==}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@rollup/rollup-win32-arm64-msvc@4.18.0':
     resolution: {integrity: sha512-7J6TkZQFGo9qBKH0pk2cEVSRhJbL6MtfWxth7Y5YmZs57Pi+4x6c2dStAUvaQkHQLnEQv1jzBUW43GvZW8OFqA==}
@@ -1717,28 +1695,24 @@ packages:
     engines: {node: '>=10'}
     cpu: [arm64]
     os: [linux]
-    libc: [glibc]
 
   '@swc/core-linux-arm64-musl@1.11.13':
     resolution: {integrity: sha512-+ukuB8RHD5BHPCUjQwuLP98z+VRfu+NkKQVBcLJGgp0/+w7y0IkaxLY/aKmrAS5ofCNEGqKL+AOVyRpX1aw+XA==}
     engines: {node: '>=10'}
     cpu: [arm64]
     os: [linux]
-    libc: [musl]
 
   '@swc/core-linux-x64-gnu@1.11.13':
     resolution: {integrity: sha512-q9H3WI3U3dfJ34tdv60zc8oTuWvSd5fOxytyAO9Pc5M82Hic3jjWaf2xBekUg07ubnMZpyfnv+MlD+EbUI3Llw==}
     engines: {node: '>=10'}
     cpu: [x64]
     os: [linux]
-    libc: [glibc]
 
   '@swc/core-linux-x64-musl@1.11.13':
     resolution: {integrity: sha512-9aaZnnq2pLdTbAzTSzy/q8dr7Woy3aYIcQISmw1+Q2/xHJg5y80ZzbWSWKYca/hKonDMjIbGR6dp299I5J0aeA==}
     engines: {node: '>=10'}
     cpu: [x64]
     os: [linux]
-    libc: [musl]
 
   '@swc/core-win32-arm64-msvc@1.11.13':
     resolution: {integrity: sha512-n3QZmDewkHANcoHvtwvA6yJbmS4XJf0MBMmwLZoKDZ2dOnC9D/jHiXw7JOohEuzYcpLoL5tgbqmjxa3XNo9Oow==}
@@ -2083,9 +2057,6 @@ packages:
   binary-extensions@2.3.0:
     resolution: {integrity: sha512-Ceh+7ox5qe7LJuLHoY0feh3pHuUDHAcRUeyL2VYghZwfpkNIy/+8Ocg0a3UuSoYzavmylwuLWQOf3hl0jjMMIw==}
     engines: {node: '>=8'}
-
-  bindings@1.5.0:
-    resolution: {integrity: sha512-p2q/t/mhvuOj/UeLlV6566GD/guowlr0hHxClI0W9m7MWYkL1F0hLo+0Aexs9HSPCtR1SXQ0TD3MMKrXZajbiQ==}
 
   bl@4.1.0:
     resolution: {integrity: sha512-1W07cM9gS6DcLperZfFSj+bWLtaPGSOHWhPiGzXmvVJbRLdG82sH/Kn8EtW1VqWVA54AKf2h5k5BbnIbwF3h6w==}
@@ -2602,9 +2573,6 @@ packages:
   file-entry-cache@8.0.0:
     resolution: {integrity: sha512-XXTUwCvisa5oacNGRP9SfNtYBNAMi+RPwBFmblZEF7N7swHYQS6/Zfk7SRwx4D5j3CH211YNRco1DEMNVfZCnQ==}
     engines: {node: '>=16.0.0'}
-
-  file-uri-to-path@1.0.0:
-    resolution: {integrity: sha512-0Zt+s3L7Vf1biwWZ29aARiVYLx7iMGnEUl9x33fbB/j3jR81u/O2LbqK+Bm1CDSNDKVtJ/YjwY7TUd5SkeLQLw==}
 
   filelist@1.0.4:
     resolution: {integrity: sha512-w1cEuf3S+DrLCQL7ET6kz+gmlJdbq9J7yXCSjK/OZCPA+qEN1WyF4ZAf0YYJa4/shHJra2t/d/r8SV4Ji+x+8Q==}
@@ -3296,9 +3264,6 @@ packages:
 
   ms@2.1.3:
     resolution: {integrity: sha512-6FlzubTLZG3J2a/NVCAleEhjzq5oxgHyaCU9yYXvcLsvoVaHJq/s5xXI6/XXP6tz7R9xAOtHnSO/tXtF3WRTlA==}
-
-  nan@2.23.0:
-    resolution: {integrity: sha512-1UxuyYGdoQHcGg87Lkqm3FzefucTa0NAiOcuRsDmysep3c1LVCRK2krrUDafMWtjSG04htvAmvg96+SDknOmgQ==}
 
   nanoid@3.3.7:
     resolution: {integrity: sha512-eSRppjcPIatRIMC1U6UngP8XFcz8MQWGQdt1MTBQ7NaAmvXDfvNxbvWV3x2y6CdEUciCSsDHDQZbhYaB8QEo2g==}
@@ -4040,9 +4005,6 @@ packages:
     resolution: {integrity: sha512-OljLrQ9SQdOUqTaQxqL5dEfZWrXExyyWsozYlAWFawPVNuD83igl7uJD2RTkNMbniIYgt8l81eCJGIdQF7avLQ==}
     engines: {node: ^14.17.0 || ^16.13.0 || >=18.0.0}
 
-  verb-nurbs-web@2.1.3:
-    resolution: {integrity: sha512-2PvI2bx7dn0r3kWtk+JuDIDZ+p7I5Piu8y6/ZNhUVpilOyHKK1nNzLHtgown+dFOmBnKnuAKIMh1xn/5kzrxZA==}
-
   vite-plugin-static-copy@3.1.4:
     resolution: {integrity: sha512-iCmr4GSw4eSnaB+G8zc2f4dxSuDjbkjwpuBLLGvQYR9IW7rnDzftnUjOH5p4RYR+d4GsiBqXRvzuFhs5bnzVyw==}
     engines: {node: ^18.0.0 || >=20.0.0}
@@ -4088,10 +4050,6 @@ packages:
 
   wcwidth@1.0.1:
     resolution: {integrity: sha512-XHPEwS0q6TaxcvG85+8EYkbiCux2XtWG2mkc47Ng2A77BQu9+DqIOJldST4HgPkuea7dvKSj5VgX3P1d4rW8Tg==}
-
-  webworker-threads@0.7.17:
-    resolution: {integrity: sha512-Y2w2aXBbDLk9IzTEb9u+MsODC3s4YlGI7g4h0t+1OAwIO8yBI9rQL35ZYlyayiCuWu1dZMH/P7kGU8OwW7YsyA==}
-    engines: {node: '>= 0.10.16'}
 
   which@2.0.2:
     resolution: {integrity: sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA==}
@@ -6022,7 +5980,7 @@ snapshots:
     dependencies:
       levn: 0.4.1
 
-  '@fxts/core@1.17.0':
+  '@fxts/core@1.26.0':
     dependencies:
       tslib: 2.6.3
 
@@ -6301,13 +6259,13 @@ snapshots:
       globby: 11.1.0
       read-yaml-file: 1.1.0
 
-  '@mlightcad/dxf-json@1.0.10':
+  '@mlightcad/dxf-json@1.1.2':
     dependencies:
-      '@fxts/core': 1.17.0
+      '@fxts/core': 1.26.0
 
   '@mlightcad/libdxfrw-web@0.0.9': {}
 
-  '@mlightcad/libredwg-web@0.6.6': {}
+  '@mlightcad/libredwg-web@0.6.7': {}
 
   '@nodelib/fs.scandir@2.1.5':
     dependencies:
@@ -7038,11 +6996,6 @@ snapshots:
 
   binary-extensions@2.3.0: {}
 
-  bindings@1.5.0:
-    dependencies:
-      file-uri-to-path: 1.0.0
-    optional: true
-
   bl@4.1.0:
     dependencies:
       buffer: 5.7.1
@@ -7580,9 +7533,6 @@ snapshots:
   file-entry-cache@8.0.0:
     dependencies:
       flat-cache: 4.0.1
-
-  file-uri-to-path@1.0.0:
-    optional: true
 
   filelist@1.0.4:
     dependencies:
@@ -8422,9 +8372,6 @@ snapshots:
 
   ms@2.1.3: {}
 
-  nan@2.23.0:
-    optional: true
-
   nanoid@3.3.7: {}
 
   natural-compare@1.4.0: {}
@@ -9164,10 +9111,6 @@ snapshots:
 
   validate-npm-package-name@5.0.1: {}
 
-  verb-nurbs-web@2.1.3:
-    optionalDependencies:
-      webworker-threads: 0.7.17
-
   vite-plugin-static-copy@3.1.4(vite@5.3.2(@types/node@20.14.9)(sass@1.83.0)(terser@5.31.6)):
     dependencies:
       chokidar: 3.6.0
@@ -9207,12 +9150,6 @@ snapshots:
   wcwidth@1.0.1:
     dependencies:
       defaults: 1.0.4
-
-  webworker-threads@0.7.17:
-    dependencies:
-      bindings: 1.5.0
-      nan: 2.23.0
-    optional: true
 
   which@2.0.2:
     dependencies:

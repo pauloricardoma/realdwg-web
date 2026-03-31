@@ -3,6 +3,7 @@ import {
   AcGeBox3d,
   AcGeCircArc2d,
   AcGeEllipseArc2d,
+  AcGeIndexNode,
   AcGeLine2d,
   AcGeLoop2d,
   AcGeLoop2dType,
@@ -108,6 +109,10 @@ export enum AcDbHatchStyle {
 export class AcDbHatch extends AcDbEntity {
   /** The entity type name */
   static override typeName: string = 'Hatch'
+
+  override get dxfTypeName() {
+    return 'HATCH'
+  }
 
   /** The underlying geometric area object */
   private _geo: AcGeArea2d
@@ -252,15 +257,58 @@ export class AcDbHatch extends AcDbEntity {
     this._geo.add(loop)
   }
 
+  private buildAreasFromLoops() {
+    const loops = this._geo.loops
+    if (loops.length === 0) return []
+    if (loops.length === 1) return [this._geo]
+
+    const hierarchy = this._geo.buildHierarchy()
+    const areas: AcGeArea2d[] = []
+
+    const visit = (node: AcGeIndexNode, depth: number) => {
+      if (node.index >= 0 && depth % 2 === 0) {
+        const area = new AcGeArea2d()
+        area.add(loops[node.index])
+        node.children.forEach(child => {
+          if (child.index >= 0) {
+            area.add(loops[child.index])
+          }
+        })
+        areas.push(area)
+      }
+      node.children.forEach(child => visit(child, depth + 1))
+    }
+
+    hierarchy.children.forEach(child => visit(child, 0))
+
+    return areas.length > 0 ? areas : [this._geo]
+  }
+
+  private getCalculatedAreaValue() {
+    const areas = this.buildAreasFromLoops()
+    if (areas.length === 0) return 0
+    return areas.reduce((sum, area) => sum + area.area, 0)
+  }
+
   /**
    * @inheritdoc
    */
   get geometricExtents() {
-    const box = this._geo.box
-    return new AcGeBox3d(
-      { x: box.min.x, y: box.min.y, z: this._elevation },
-      { x: box.max.x, y: box.max.y, z: this._elevation }
-    )
+    const areas = this.buildAreasFromLoops()
+    if (areas.length === 0) {
+      return new AcGeBox3d()
+    }
+    const extents = new AcGeBox3d()
+    areas.forEach(area => {
+      const box = area.box
+      extents.union(
+        new AcGeBox3d(
+          { x: box.min.x, y: box.min.y, z: this._elevation },
+          { x: box.max.x, y: box.max.y, z: this._elevation }
+        )
+      )
+    })
+    return extents
   }
 
   /**
@@ -351,7 +399,7 @@ export class AcDbHatch extends AcDbEntity {
               type: 'float',
               editable: false,
               accessor: {
-                get: () => this._geo.area
+                get: () => this.getCalculatedAreaValue()
               }
             }
           ]
@@ -370,9 +418,23 @@ export class AcDbHatch extends AcDbEntity {
       patternAngle: this.patternAngle,
       definitionLines: this.definitionLines
     }
-    return renderer.area(this._geo)
+    const areas = this.buildAreasFromLoops()
+    if (areas.length === 0) {
+      return renderer.area(this._geo)
+    }
+    if (areas.length === 1) {
+      return renderer.area(areas[0])
+    }
+    const entities = areas.map(area => renderer.area(area))
+    return renderer.group(entities)
   }
 
+  /**
+   * Writes DXF fields for this object.
+   *
+   * @param filer - DXF output writer.
+   * @returns The instance (for chaining).
+   */
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
     const loops = this._geo.loops

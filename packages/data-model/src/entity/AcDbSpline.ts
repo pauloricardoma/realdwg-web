@@ -41,6 +41,10 @@ export class AcDbSpline extends AcDbCurve {
   /** The entity type name */
   static override typeName: string = 'Spline'
 
+  override get dxfTypeName() {
+    return 'SPLINE'
+  }
+
   /** The underlying geometric spline object */
   private _geo: AcGeSpline3d
 
@@ -223,6 +227,12 @@ export class AcDbSpline extends AcDbCurve {
     return renderer.lines(points)
   }
 
+  /**
+   * Writes DXF fields for this object.
+   *
+   * @param filer - DXF output writer.
+   * @returns The instance (for chaining).
+   */
   override dxfOutFields(filer: AcDbDxfFiler) {
     const spline = this._geo as unknown as {
       degree: number

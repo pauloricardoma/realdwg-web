@@ -1,9 +1,4 @@
-import {
-  AcCmAttributes,
-  AcCmObject,
-  AcCmStringKey,
-  defaults
-} from '@mlightcad/common'
+import { AcCmAttributes, AcCmObject, AcCmStringKey } from '@mlightcad/common'
 import { uid } from 'uid'
 
 import type { AcDbDatabase } from '../database/AcDbDatabase'
@@ -13,6 +8,9 @@ import { AcDbResultBuffer } from './AcDbResultBuffer'
 
 /** Type alias for object ID as string */
 export type AcDbObjectId = string
+
+/** Prefix for temporary object IDs that are not yet committed to the database */
+export const TEMP_OBJECT_ID_PREFIX = 'TEMP_'
 
 let hostApplicationServicesProvider:
   | (() => { workingDatabase: AcDbDatabase })
@@ -81,9 +79,27 @@ export class AcDbObject<ATTRS extends AcDbObjectAttrs = AcDbObjectAttrs> {
    */
   constructor(attrs?: Partial<ATTRS>, defaultAttrs?: Partial<ATTRS>) {
     attrs = attrs || {}
-    defaults(attrs, { objectId: uid() })
     this._attrs = new AcCmObject<ATTRS>(attrs, defaultAttrs)
     this._xDataMap = new Map()
+
+    // Generate objectId from database if not provided
+    if (!this._attrs.get('objectId')) {
+      try {
+        this._attrs.set('objectId', this.database.generateHandle())
+      } catch {
+        // Fallback: generate a temporary handle, will be reassigned when added to database
+        this._attrs.set('objectId', this.generateTemporaryHandle())
+      }
+    }
+  }
+
+  /**
+   * Generates a temporary handle when database is not available
+   * This is a fallback and will be replaced when the object is added to a database
+   * @returns A temporary hexadecimal string
+   */
+  private generateTemporaryHandle(): AcDbObjectId {
+    return TEMP_OBJECT_ID_PREFIX + uid()
   }
 
   /**
@@ -196,6 +212,21 @@ export class AcDbObject<ATTRS extends AcDbObjectAttrs = AcDbObjectAttrs> {
    */
   set objectId(value: AcDbObjectId) {
     this._attrs.set('objectId', value)
+
+    // Update the database's maxHandle if the new objectId is a valid hex handle
+    if (value && !value.startsWith(TEMP_OBJECT_ID_PREFIX)) {
+      this.database.updateMaxHandle(value)
+    }
+  }
+
+  /**
+   * Returns true if this object is temporary and not yet committed to the database.
+   *
+   * A temporary object is identified by its objectId starting with the TEMP prefix.
+   */
+  get isTemp() {
+    const id = this.getAttrWithoutException('objectId')
+    return !!id && id.startsWith(TEMP_OBJECT_ID_PREFIX)
   }
 
   /**
@@ -445,6 +476,15 @@ export class AcDbObject<ATTRS extends AcDbObjectAttrs = AcDbObjectAttrs> {
   /**
    * Writes the common DXF wrapper for this object and then delegates the
    * object-specific payload to {@link dxfOutFields}.
+   *
+   * @param filer - DXF output writer.
+   * @param allXdata - When true, emits all XData attached to this object.
+   * @returns The object instance (for chaining).
+   */
+  /**
+   * Writes this object to the DXF output.
+   *
+   * @returns The instance (for chaining).
    */
   dxfOut(...args: unknown[]): unknown {
     const [filer, allXdata = false] = args as [
@@ -470,6 +510,15 @@ export class AcDbObject<ATTRS extends AcDbObjectAttrs = AcDbObjectAttrs> {
    *
    * Subclasses should override this method and call `super.dxfOutFields(filer)`
    * first so the subclass markers remain consistent.
+   *
+   * @param _filer - DXF output writer.
+   * @returns The object instance (for chaining).
+   */
+  /**
+   * Writes DXF fields for this object.
+   *
+   * @param filer - DXF output writer.
+   * @returns The instance (for chaining).
    */
   dxfOutFields(_filer: AcDbDxfFiler) {
     // For better downstream compatibility, the object-level marker (AcDbObject) is omitted.

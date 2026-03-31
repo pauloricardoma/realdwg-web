@@ -1,6 +1,7 @@
 import {
   AcCmColor,
   AcDbBatchProcessing,
+  AcDbBlockScaling,
   AcDbBlockTableRecord,
   AcDbConversionProgressCallback,
   AcDbDatabase,
@@ -234,7 +235,7 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
         dimaunit: item.DIMAUNIT,
         dimfrac: item.DIMFRAC,
         dimlunit: item.DIMLUNIT,
-        dimdsep: item.DIMDSEP,
+        dimdsep: item.DIMDSEP || '.',
         dimtmove: item.DIMTMOVE || 0,
         dimjust: item.DIMJUST as unknown as AcDbDimTextHorizontal.Center,
         dimsd1: item.DIMSD1,
@@ -396,6 +397,12 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
         dbBlock.ownerId = btr.ownerHandle
         dbBlock.origin.copy(btr.basePoint)
         dbBlock.layoutId = btr.layout
+        dbBlock.blockInsertUnits = btr.insertionUnits
+        dbBlock.explodability = btr.explodability
+        dbBlock.blockScaling = btr.scalability as AcDbBlockScaling
+        if (btr.bmpPreview) {
+          dbBlock.bmpPreview = btr.bmpPreview
+        }
         db.tables.blockTable.add(dbBlock)
       }
 
@@ -531,6 +538,7 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
       const dbLayout = new AcDbLayout()
       dbLayout.layoutName = layout.layoutName
       dbLayout.tabOrder = layout.tabOrder
+
       // layout.paperSpaceTableId doesn't point to the block table record asscicated with
       // this layout. So let's get the assocated block table record id from block table.
       const btrs = db.tables.blockTable.newIterator()
@@ -555,6 +563,9 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
       dbLayout.limits.max.copy(layout.maxLimit)
       dbLayout.extents.min.copy(layout.minExtent)
       dbLayout.extents.max.copy(layout.maxExtent)
+      if (layout.viewportId) {
+        dbLayout.viewportArray.push(layout.viewportId)
+      }
       this.processCommonObjectAttrs(layout, dbLayout)
       layoutDict.setAt(dbLayout.layoutName, dbLayout)
     })

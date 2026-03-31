@@ -1,5 +1,45 @@
 # @mlightcad/data-model
 
+## 1.7.12
+
+### Patch Changes
+
+- fix: upgrade dxf-json to fix bug #132 in cad-viewer repo
+- Updated dependencies
+  - @mlightcad/common@1.4.12
+  - @mlightcad/geometry-engine@3.2.12
+  - @mlightcad/graphic-interface@3.3.12
+
+## 1.7.11
+
+### Patch Changes
+
+- fix issue on converting spline with fit points
+- Updated dependencies
+  - @mlightcad/common@1.4.11
+  - @mlightcad/geometry-engine@3.2.11
+  - @mlightcad/graphic-interface@3.3.11
+
+## 1.7.10
+
+### Patch Changes
+
+- fix: fix bugs on building loops for hatch and revome dependency on verb-nurbs
+- Updated dependencies
+  - @mlightcad/common@1.4.10
+  - @mlightcad/geometry-engine@3.2.10
+  - @mlightcad/graphic-interface@3.3.10
+
+## 1.7.9
+
+### Patch Changes
+
+- feat: improve DXF export
+- Updated dependencies
+  - @mlightcad/common@1.4.9
+  - @mlightcad/geometry-engine@3.2.9
+  - @mlightcad/graphic-interface@3.3.9
+
 ## 1.7.8
 
 ### Patch Changes

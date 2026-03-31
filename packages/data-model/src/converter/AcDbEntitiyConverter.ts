@@ -47,6 +47,7 @@ import {
   RadialDiameterDimensionEntity
 } from '@mlightcad/dxf-json'
 import {
+  AcGeBoundaryEdgeType,
   AcGeCircArc2d,
   AcGeEllipseArc2d,
   AcGeLine2d,
@@ -379,18 +380,12 @@ export class AcDbEntityConverter {
           !!(spline.flag & 0x01)
         )
       } else if (spline.numberOfFitPoints > 0) {
-        const fitPoints = this.numberArrayToPointArray(
+        return new AcDbSpline(
           spline.fitPoints,
-          spline.numberOfFitPoints
+          'Uniform',
+          spline.degree,
+          !!(spline.flag & 0x01)
         )
-        if (fitPoints != null) {
-          return new AcDbSpline(
-            fitPoints,
-            'Uniform',
-            spline.degree,
-            !!(spline.flag & 0x01)
-          )
-        }
       }
     } catch (error) {
       console.log(`Failed to convert spline with error: ${error}`)
@@ -522,14 +517,14 @@ export class AcDbEntityConverter {
         dbEntity.add(polyline)
       } else {
         const edgePath = path as EdgeBoundaryPath<BoundaryPathEdge>
-        const loop = new AcGeLoop2d()
+        const edges: AcGeBoundaryEdgeType[] = []
         edgePath.edges.forEach(edge => {
           if (edge.type == 1) {
             const line = edge as LineEdge
-            loop.add(new AcGeLine2d(line.start, line.end))
+            edges.push(new AcGeLine2d(line.start, line.end))
           } else if (edge.type == 2) {
             const arc = edge as ArcEdge
-            loop.add(
+            edges.push(
               new AcGeCircArc2d(
                 arc.center,
                 arc.radius,
@@ -556,7 +551,7 @@ export class AcDbEntityConverter {
               startAngle = Math.PI * 2 - startAngle
               endAngle = Math.PI * 2 - endAngle
             }
-            loop.add(
+            edges.push(
               new AcGeEllipseArc2d(
                 { ...ellipse.center, z: 0 },
                 majorAxisRadius,
@@ -584,7 +579,7 @@ export class AcDbEntityConverter {
                 if (item.weight == null) hasWeights = false
                 return item.weight || 1
               })
-              loop.add(
+              edges.push(
                 new AcGeSpline3d(
                   controlPoints,
                   spline.knots,
@@ -599,11 +594,17 @@ export class AcDbEntityConverter {
                   z: 0
                 }
               })
-              loop.add(new AcGeSpline3d(fitPoints, 'Uniform'))
+              edges.push(new AcGeSpline3d(fitPoints, 'Uniform'))
             }
           }
         })
-        dbEntity.add(loop)
+        const loops = AcGeLoop2d.buildFromEdges(edges)
+        if (loops.length == 0 && edges.length > 0) {
+          // Fallback: keep original order if we failed to build any loop.
+          dbEntity.add(new AcGeLoop2d(edges))
+        } else {
+          loops.forEach(loop => dbEntity.add(loop))
+        }
       }
     })
     return dbEntity
@@ -615,9 +616,20 @@ export class AcDbEntityConverter {
       table.rowCount,
       table.columnCount
     )
+    dbEntity.tableDataVersion = table.version
+    dbEntity.tableStyleId = table.tableStyleId
+    dbEntity.owningBlockRecordId = table.blockRecordHandle
+    if (table.directionVector) {
+      dbEntity.horizontalDirection = new AcGeVector3d(table.directionVector)
+    }
     dbEntity.attachmentPoint =
       table.attachmentPoint as unknown as AcGiMTextAttachmentPoint
     dbEntity.position.copy(table.startPoint)
+    dbEntity.tableValueFlag = table.tableValue
+    dbEntity.tableOverrideFlag = table.overrideFlag
+    dbEntity.borderColorOverrideFlag = table.borderColorOverrideFlag
+    dbEntity.borderLineweightOverrideFlag = table.borderLineWeightOverrideFlag
+    dbEntity.borderVisibilityOverrideFlag = table.borderVisibilityOverrideFlag
     table.columnWidthArr.forEach((width, index) =>
       dbEntity.setColumnWidth(index, width)
     )
@@ -718,7 +730,7 @@ export class AcDbEntityConverter {
       const entity = dimension as RadialDiameterDimensionEntity
       const dbEntity = new AcDbRadialDimension(
         entity.definitionPoint,
-        entity.centerPoint,
+        entity.subDefinitionPoint,
         entity.leaderLength
       )
       this.processDimensionCommonAttrs(dimension, dbEntity)
@@ -727,7 +739,7 @@ export class AcDbEntityConverter {
       const entity = dimension as RadialDiameterDimensionEntity
       const dbEntity = new AcDbDiametricDimension(
         entity.definitionPoint,
-        entity.centerPoint,
+        entity.subDefinitionPoint,
         entity.leaderLength
       )
       this.processDimensionCommonAttrs(dimension, dbEntity)
@@ -741,6 +753,7 @@ export class AcDbEntityConverter {
     dbImage.brightness = image.brightness
     dbImage.contrast = image.contrast
     dbImage.fade = image.fade
+    dbImage.imageSize.copy(image.imageSize)
 
     dbImage.isShownClipped = (image.flags | 0x0004) > 0
     dbImage.isImageShown = (image.flags | 0x0003) > 0
@@ -779,6 +792,7 @@ export class AcDbEntityConverter {
     dbWipeout.brightness = wipeout.brightness
     dbWipeout.contrast = wipeout.contrast
     dbWipeout.fade = wipeout.fade
+    dbWipeout.imageSize.copy(wipeout.imageSize)
 
     dbWipeout.isShownClipped = (wipeout.displayFlag | 0x0004) > 0
     dbWipeout.isImageShown = (wipeout.displayFlag | 0x0003) > 0
@@ -897,7 +911,7 @@ export class AcDbEntityConverter {
     dbEntity.layer = entity.layer || '0'
     // I found some dxf file may have entity without handle. If so, let's use objectId
     // created by AcDbObject constructor instead.
-    if (entity.handle) dbEntity.objectId = entity.handle
+    if (entity.handle) dbEntity.objectId = entity.handle.toString()
     dbEntity.ownerId = entity.ownerBlockRecordSoftId || ''
     if (entity.lineType != null) {
       dbEntity.lineType = entity.lineType
@@ -923,45 +937,5 @@ export class AcDbEntityConverter {
     if (entity.transparency != null) {
       dbEntity.transparency = AcCmTransparency.deserialize(entity.transparency)
     }
-  }
-
-  /**
-   * Converts a number array to an array of 3D points.
-   *
-   * This utility method takes a flat array of numbers and converts it to
-   * an array of AcGePoint3dLike objects. It automatically detects whether
-   * the input represents 2D or 3D points based on the array length and
-   * number of points.
-   *
-   * @param numbers - Flat array of numbers representing point coordinates
-   * @param numberOfPoints - Expected number of points in the array
-   * @returns Array of AcGePoint3dLike objects, or undefined if the conversion fails
-   *
-   * @example
-   * ```typescript
-   * const numbers = [0, 0, 10, 10, 20, 20]; // 3 points in 2D
-   * const points = converter.numberArrayToPointArray(numbers, 3);
-   * // Returns: [{x: 0, y: 0, z: 0}, {x: 10, y: 10, z: 0}, {x: 20, y: 20, z: 0}]
-   * ```
-   */
-  private numberArrayToPointArray(numbers: number[], numberOfPoints: number) {
-    const count = numbers.length
-    let dimension = 0
-    if (count / 2 == numberOfPoints) {
-      dimension = 2
-    } else if (count / 3 == numberOfPoints) {
-      dimension = 3
-    }
-    if (dimension == 0) return undefined
-
-    const points: AcGePoint3dLike[] = []
-    for (let index = 0, size = count / dimension; index < size; ++index) {
-      points.push({
-        x: numbers[index * dimension],
-        y: numbers[index * dimension + 1],
-        z: dimension == 3 ? numbers[index * dimension + 2] : 0
-      })
-    }
-    return points
   }
 }

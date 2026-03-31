@@ -42,6 +42,10 @@ export class AcDbArc extends AcDbCurve {
   /** The entity type name */
   static override typeName: string = 'Arc'
 
+  override get dxfTypeName() {
+    return 'ARC'
+  }
+
   /** The underlying geometric circular arc object */
   private _geo: AcGeCircArc3d
 
@@ -564,6 +568,12 @@ export class AcDbArc extends AcDbCurve {
     return renderer.circularArc(this._geo)
   }
 
+  /**
+   * Writes DXF fields for this object.
+   *
+   * @param filer - DXF output writer.
+   * @returns The instance (for chaining).
+   */
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
     filer.writeSubclassMarker('AcDbArc')

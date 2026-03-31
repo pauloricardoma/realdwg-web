@@ -34,6 +34,10 @@ export class AcDb3dVertex extends AcDbEntity {
   /** The entity type name */
   static override typeName: string = '3dVertex'
 
+  override get dxfTypeName() {
+    return 'VERTEX'
+  }
+
   /** The WCS point value of this vertex */
   private _position: AcGePoint3d
   /** The vertex type */
@@ -144,6 +148,12 @@ export class AcDb3dVertex extends AcDbEntity {
     return undefined
   }
 
+  /**
+   * Writes DXF fields for this object.
+   *
+   * @param filer - DXF output writer.
+   * @returns The instance (for chaining).
+   */
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
     filer.writeSubclassMarker('AcDbVertex')

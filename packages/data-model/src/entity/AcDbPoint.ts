@@ -37,6 +37,10 @@ export class AcDbPoint extends AcDbEntity {
   /** The entity type name */
   static override typeName: string = 'Point'
 
+  override get dxfTypeName() {
+    return 'POINT'
+  }
+
   /** The underlying geometric point object */
   private _geo: AcGePoint3d
 
@@ -220,6 +224,12 @@ export class AcDbPoint extends AcDbEntity {
     })
   }
 
+  /**
+   * Writes DXF fields for this object.
+   *
+   * @param filer - DXF output writer.
+   * @returns The instance (for chaining).
+   */
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
     filer.writeSubclassMarker('AcDbPoint')
