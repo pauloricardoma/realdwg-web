@@ -1,5 +1,32 @@
 # @mlightcad/graphic-interface
 
+## 3.3.15
+
+### Patch Changes
+
+- feat: improve geometry and optimize build configuration
+- Updated dependencies
+  - @mlightcad/common@1.4.15
+  - @mlightcad/geometry-engine@3.2.15
+
+## 3.3.14
+
+### Patch Changes
+
+- fix: improve DXF export functionality and refine AcDbSpline
+- Updated dependencies
+  - @mlightcad/common@1.4.14
+  - @mlightcad/geometry-engine@3.2.14
+
+## 3.3.13
+
+### Patch Changes
+
+- fix: fix #issue 150 in cad-viewer (#43)
+- Updated dependencies
+  - @mlightcad/common@1.4.13
+  - @mlightcad/geometry-engine@3.2.13
+
 ## 3.3.12
 
 ### Patch Changes

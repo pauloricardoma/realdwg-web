@@ -222,6 +222,18 @@ export interface AcDbOpenDatabaseOptions {
    * file in a web worker. If omitted, the converter-level timeout is used.
    */
   timeout?: number
+
+  /**
+   * System variables to override in the database.
+   *
+   * This allows overriding system variable values when opening a database.
+   * For example, to disable line weight display regardless of the database's
+   * stored value, set { 'lwdisplay': false }.
+   *
+   * The keys are system variable names (case-insensitive), and values can be
+   * number, boolean, or string types.
+   */
+  sysVars?: Record<string, number | boolean | string>
 }
 
 /**
@@ -369,7 +381,7 @@ export class AcDbDatabase extends AcDbObject {
     // TODO: Default value is 1 (imperial) or 4 (metric)
     this._insunits = AcDbUnitsValue.Millimeters
     this._ltscale = 1
-    this._lwdisplay = true
+    this._lwdisplay = false
     this._pdmode = 0
     this._pdsize = 0
     this._osmode = 0
@@ -999,7 +1011,8 @@ export class AcDbDatabase extends AcDbObject {
           await options.fontLoader.load(fonts)
         }
       },
-      options?.timeout
+      options?.timeout,
+      options?.sysVars
     )
 
     this.ensureDatabaseDefaults()
@@ -1322,6 +1335,12 @@ export class AcDbDatabase extends AcDbObject {
     filer.startSection('HEADER')
     filer.writeString(9, '$ACADVER')
     filer.writeString(1, filer.version?.name ?? this.version.name)
+    filer.writeString(9, '$HANDSEED')
+    filer.writeString(5, filer.nextHandle.toString(16).toUpperCase())
+    if (filer.version != null && filer.version.value >= 27) {
+      filer.writeString(9, '$DWGCODEPAGE')
+      filer.writeString(3, 'UTF-8')
+    }
     filer.writeString(9, '$INSUNITS')
     filer.writeInt16(70, this.insunits)
     filer.writeString(9, '$LTSCALE')

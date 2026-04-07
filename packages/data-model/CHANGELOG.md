@@ -1,5 +1,35 @@
 # @mlightcad/data-model
 
+## 1.7.15
+
+### Patch Changes
+
+- feat: improve geometry and optimize build configuration
+- Updated dependencies
+  - @mlightcad/common@1.4.15
+  - @mlightcad/geometry-engine@3.2.15
+  - @mlightcad/graphic-interface@3.3.15
+
+## 1.7.14
+
+### Patch Changes
+
+- fix: improve DXF export functionality and refine AcDbSpline
+- Updated dependencies
+  - @mlightcad/common@1.4.14
+  - @mlightcad/geometry-engine@3.2.14
+  - @mlightcad/graphic-interface@3.3.14
+
+## 1.7.13
+
+### Patch Changes
+
+- fix: fix #issue 150 in cad-viewer (#43)
+- Updated dependencies
+  - @mlightcad/common@1.4.13
+  - @mlightcad/geometry-engine@3.2.13
+  - @mlightcad/graphic-interface@3.3.13
+
 ## 1.7.12
 
 ### Patch Changes

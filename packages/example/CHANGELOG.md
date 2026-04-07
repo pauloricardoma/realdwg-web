@@ -1,5 +1,32 @@
 # @mlightcad/realdwg-web-example
 
+## 0.1.15
+
+### Patch Changes
+
+- feat: improve geometry and optimize build configuration
+- Updated dependencies
+  - @mlightcad/data-model@1.7.15
+  - @mlightcad/libredwg-converter@3.5.15
+
+## 0.1.14
+
+### Patch Changes
+
+- fix: improve DXF export functionality and refine AcDbSpline
+- Updated dependencies
+  - @mlightcad/data-model@1.7.14
+  - @mlightcad/libredwg-converter@3.5.14
+
+## 0.1.13
+
+### Patch Changes
+
+- fix: fix #issue 150 in cad-viewer (#43)
+- Updated dependencies
+  - @mlightcad/data-model@1.7.13
+  - @mlightcad/libredwg-converter@3.5.13
+
 ## 0.1.12
 
 ### Patch Changes

@@ -1,5 +1,23 @@
 # @mlightcad/common
 
+## 1.4.15
+
+### Patch Changes
+
+- feat: improve geometry and optimize build configuration
+
+## 1.4.14
+
+### Patch Changes
+
+- fix: improve DXF export functionality and refine AcDbSpline
+
+## 1.4.13
+
+### Patch Changes
+
+- fix: fix #issue 150 in cad-viewer (#43)
+
 ## 1.4.12
 
 ### Patch Changes
