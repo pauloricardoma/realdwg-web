@@ -31,8 +31,6 @@ export class AcDbDictionary<
 > extends AcDbObject {
   /** Map of records indexed by name */
   protected _recordsByName: Map<string, TObjectType>
-  /** Map of records indexed by object ID */
-  protected _recordsById: Map<string, TObjectType>
 
   /**
    * Creates a new AcDbDictionary instance.
@@ -49,7 +47,6 @@ export class AcDbDictionary<
     this.database = db
     this.objectId = db.generateHandle()
     this._recordsByName = new Map<string, TObjectType>()
-    this._recordsById = new Map<string, TObjectType>()
   }
 
   /**
@@ -83,18 +80,53 @@ export class AcDbDictionary<
    * ```
    */
   setAt(key: string, value: TObjectType) {
+    const manager = this.database.transactionManager
+    if (
+      manager.strictMode &&
+      !manager.isRecording() &&
+      !manager.isApplyingUndoRedo()
+    ) {
+      throw new Error(
+        'Cannot modify dictionary entries outside an active transaction.'
+      )
+    }
+
+    const existing = this.getAt(key)
+    if (existing) {
+      if (manager.isRecording()) {
+        manager.recordRemove(
+          {
+            type: 'dictionary',
+            dictionaryId: this.objectId,
+            key
+          },
+          existing
+        )
+      }
+      this.database.releaseObjectHandle(existing)
+    }
+
     value.database = this.database
     value.ownerId = this.objectId
 
     this.database.commitObjectHandle(value, id => this.hasId(id))
 
     this._recordsByName.set(key, value)
-    this._recordsById.set(value.objectId, value)
-    this.database.events.dictObjetSet.dispatch({
-      database: this.database,
-      object: value,
-      key: key
-    })
+
+    if (manager.isRecording()) {
+      manager.recordAppend(
+        {
+          type: 'dictionary',
+          dictionaryId: this.objectId,
+          key
+        },
+        value
+      )
+    }
+
+    if (!manager.isRecording() && !manager.isApplyingUndoRedo()) {
+      this.database.notifyDictObjectSet(value, key)
+    }
   }
 
   /**
@@ -114,13 +146,7 @@ export class AcDbDictionary<
   remove(name: string) {
     const object = this.getAt(name)
     if (object) {
-      this._recordsByName.delete(name.toUpperCase())
-      this._recordsById.delete(this.objectId)
-      this.database.events.dictObjectErased.dispatch({
-        database: this.database,
-        object: object,
-        key: name
-      })
+      this.removeStoredObject(object, name)
       return true
     }
     return false
@@ -140,20 +166,60 @@ export class AcDbDictionary<
   removeId(id: string) {
     const object = this.getIdAt(id)
     if (object) {
-      this._recordsById.delete(this.objectId)
+      let removedKey = ''
       this._recordsByName.forEach((value, key) => {
         if (value === object) {
-          this._recordsByName.delete(key)
-          this.database.events.dictObjectErased.dispatch({
-            database: this.database,
-            object: object,
-            key: key
-          })
+          removedKey = key
         }
       })
+      this.removeStoredObject(object, removedKey)
       return true
     }
     return false
+  }
+
+  /**
+   * Removes one dictionary entry from internal maps and records the change when needed.
+   *
+   * Shared by {@link remove} and {@link removeId}. Enforces strict-mode transaction
+   * requirements and defers {@link AcDbDatabase.notifyDictObjectErased} while
+   * recording or applying undo/redo.
+   *
+   * @param object - Stored dictionary object to remove
+   * @param key - Dictionary key associated with the object (may be empty when resolved by ID)
+   */
+  private removeStoredObject(object: TObjectType, key: string) {
+    const manager = this.database.transactionManager
+    if (
+      manager.strictMode &&
+      !manager.isRecording() &&
+      !manager.isApplyingUndoRedo()
+    ) {
+      throw new Error(
+        'Cannot remove dictionary entries outside an active transaction.'
+      )
+    }
+
+    if (manager.isRecording()) {
+      manager.recordRemove(
+        {
+          type: 'dictionary',
+          dictionaryId: this.objectId,
+          key
+        },
+        object
+      )
+    }
+
+    this._recordsByName.forEach((value, entryKey) => {
+      if (value === object) {
+        this._recordsByName.delete(entryKey)
+      }
+    })
+    this.database.releaseObjectHandle(object)
+    if (key && !manager.isRecording() && !manager.isApplyingUndoRedo()) {
+      this.database.notifyDictObjectErased(object, key)
+    }
   }
 
   /**
@@ -166,6 +232,7 @@ export class AcDbDictionary<
    */
   removeAll() {
     this._recordsByName.forEach((value, key) => {
+      this.database.releaseObjectHandle(value)
       this.database.events.dictObjectErased.dispatch({
         database: this.database,
         object: value,
@@ -173,7 +240,6 @@ export class AcDbDictionary<
       })
     })
     this._recordsByName.clear()
-    this._recordsById.clear()
   }
 
   /**
@@ -207,7 +273,7 @@ export class AcDbDictionary<
    * ```
    */
   hasId(id: string) {
-    return this._recordsById.has(id)
+    return this.getIdAt(id) !== undefined
   }
 
   /**
@@ -240,7 +306,15 @@ export class AcDbDictionary<
    * ```
    */
   getIdAt(id: AcDbObjectId) {
-    return this._recordsById.get(id)
+    const object = this.database.getObjectById(id)
+    if (!object) {
+      return undefined
+    }
+    const ownerId = object.getAttrWithoutException('ownerId')
+    if (ownerId !== this.objectId) {
+      return undefined
+    }
+    return object as TObjectType
   }
 
   /**
@@ -285,6 +359,42 @@ export class AcDbDictionary<
     for (const [key, value] of this._recordsByName) {
       filer.writeString(3, key)
       filer.writeObjectId(350, value.objectId)
+    }
+    return this
+  }
+
+  /**
+   * Reads dictionary entry name/handle pairs.
+   *
+   * Note: resolved object instances are wired later by
+   * {@link AcDbDxfObjectsReader} after child objects are loaded.
+   */
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    filer.atSubclassData('AcDbDictionary')
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      if (code === 100) {
+        filer.pushBackItem(item)
+        break
+      }
+      switch (code) {
+        case 3:
+        case 350:
+        case 340:
+        case 360:
+          // Entry name/pointer pairs are consumed here; object-graph linking
+          // is done by AcDbDxfObjectsReader once child objects exist.
+          break
+        case 280:
+        case 281:
+          break
+        default:
+          break
+      }
     }
     return this
   }

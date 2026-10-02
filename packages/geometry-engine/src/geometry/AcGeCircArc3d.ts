@@ -10,9 +10,11 @@ import {
   AcGeVector3d,
   AcGeVector3dLike
 } from '../math'
-import { AcGeMathUtil, ORIGIN_POINT_3D, TAU } from '../util'
+import { AcGeMathUtil, AcGeTol, ORIGIN_POINT_3D, TAU } from '../util'
+import { AcGeCircArc2d } from './AcGeCircArc2d'
+import { acgeComputeCircumcircle3d } from './AcGeCircArcUtil'
 import { AcGeCurve3d } from './AcGeCurve3d'
-import { AcGeLine3d } from './AcGeLine3d'
+import type { AcGeTessellateOptions } from './AcGeCurveTessellate'
 
 /**
  * The class represeting both full circles and circular arcs in 3d space. The ellipse arc is
@@ -40,54 +42,72 @@ export class AcGeCircArc3d extends AcGeCurve3d {
     endPoint: AcGePoint3dLike,
     pointOnArc: AcGePoint3dLike
   ): AcGePoint3d | null {
-    // Midpoints of the edges
-    const mid1 = new AcGeVector3d()
-      .addVectors(startPoint, endPoint)
-      .multiplyScalar(0.5)
-    const mid2 = new AcGeVector3d()
-      .addVectors(startPoint, pointOnArc)
-      .multiplyScalar(0.5)
+    return (
+      acgeComputeCircumcircle3d(startPoint, pointOnArc, endPoint)?.center ??
+      null
+    )
+  }
 
-    // Vectors perpendicular to the edges
-    const vec1 = new AcGeVector3d().subVectors(endPoint, startPoint)
-    const vec2 = new AcGeVector3d().subVectors(pointOnArc, startPoint)
+  /**
+   * Create the unique arc from `startPoint` through `pointOnArc` to `endPoint`.
+   *
+   * The through point selects the major or minor sweep, including arcs greater
+   * than 180°. The plane normal is chosen so the curve is parameterized
+   * counterclockwise from start to end. Return `null` when the points are
+   * collinear.
+   */
+  static tryCreateByThreePoints(
+    startPoint: AcGePoint3dLike,
+    endPoint: AcGePoint3dLike,
+    pointOnArc: AcGePoint3dLike
+  ): AcGeCircArc3d | null {
+    const circle = acgeComputeCircumcircle3d(startPoint, pointOnArc, endPoint)
+    if (!circle) return null
 
-    // Normal vector to the plane formed by the triangle
-    const normal = new AcGeVector3d().crossVectors(vec1, vec2).normalize()
+    const { center, radius } = circle
+    const toStart = new AcGeVector3d(
+      startPoint.x - center.x,
+      startPoint.y - center.y,
+      (startPoint.z ?? 0) - center.z
+    )
+    const toThrough = new AcGeVector3d(
+      pointOnArc.x - center.x,
+      pointOnArc.y - center.y,
+      (pointOnArc.z ?? 0) - center.z
+    )
+    const toEnd = new AcGeVector3d(
+      endPoint.x - center.x,
+      endPoint.y - center.y,
+      (endPoint.z ?? 0) - center.z
+    )
+    if (toStart.lengthSq() === 0 || toEnd.lengthSq() === 0) return null
 
+    // Prefer start×end so the initial frame matches the endpoint chord; fall
+    // back to start×through when start and end are diametrically opposite.
+    const normal = new AcGeVector3d().crossVectors(toStart, toEnd)
     if (normal.lengthSq() === 0) {
-      // If the points are collinear, the normal vector will have zero length.
-      console.error('Points are collinear and cannot form a valid arc.')
-      return null
+      normal.crossVectors(toStart, toThrough)
+      if (normal.lengthSq() === 0) return null
+    }
+    normal.normalize()
+
+    const refVec = toStart.clone().normalize()
+    const yAxis = new AcGeVector3d().crossVectors(normal, refVec)
+    const angleOf = (vector: AcGeVector3d) =>
+      AcGeMathUtil.normalizeAngle(
+        Math.atan2(vector.dot(yAxis), vector.dot(refVec))
+      )
+    if (!AcGeMathUtil.isAngleOnCcwSweep(0, angleOf(toThrough), angleOf(toEnd))) {
+      normal.negate()
+      yAxis.negate()
     }
 
-    // Compute perpendicular vectors on the plane of the triangle
-    const perpendicular1 = new AcGeVector3d()
-      .crossVectors(vec1, normal)
-      .normalize()
-    const perpendicular2 = new AcGeVector3d()
-      .crossVectors(vec2, normal)
-      .normalize()
-
-    // Solve the system of equations to find the intersection point (center of the circle)
-    const direction1 = perpendicular1
-      .clone()
-      .multiplyScalar(Number.MAX_SAFE_INTEGER)
-    const direction2 = perpendicular2
-      .clone()
-      .multiplyScalar(Number.MAX_SAFE_INTEGER)
-
-    const line1 = new AcGeLine3d(mid1, mid1.clone().add(direction1))
-    const line2 = new AcGeLine3d(mid2, mid2.clone().add(direction2))
-
-    const center = new AcGeVector3d()
-    const result = line1.closestPointToPoint(line2.startPoint, true, center)
-    if (!result) {
-      console.error('Cannot find a valid center for the arc.')
-      return null
+    let endAngle = angleOf(toEnd)
+    if (AcGeTol.equalToZero(endAngle)) {
+      endAngle = TAU
     }
 
-    return center
+    return new AcGeCircArc3d(center, radius, 0, endAngle, normal, refVec)
   }
 
   /**
@@ -101,30 +121,11 @@ export class AcGeCircArc3d extends AcGeCurve3d {
     endPoint: AcGePoint3dLike,
     pointOnArc: AcGePoint3dLike
   ) {
-    const center = AcGeCircArc3d.computeCenterPoint(
+    return AcGeCircArc3d.tryCreateByThreePoints(
       startPoint,
       endPoint,
       pointOnArc
     )
-    if (center) {
-      const radius = center.distanceTo(startPoint)
-
-      // Compute the vectors from the center to the start and end points
-      const centerToStart = new AcGeVector3d().subVectors(startPoint, center)
-      const centerToEnd = new AcGeVector3d().subVectors(endPoint, center)
-
-      // Compute the start angle and end angle relative to the x-axis
-      const startAngle = Math.atan2(centerToStart.y, centerToStart.x)
-      const endAngle = Math.atan2(centerToEnd.y, centerToEnd.x)
-
-      return new AcGeCircArc3d(
-        center,
-        radius,
-        startAngle,
-        endAngle,
-        AcGeVector3d.Z_AXIS
-      )
-    }
   }
 
   /**
@@ -297,12 +298,11 @@ export class AcGeCircArc3d extends AcGeCurve3d {
   }
 
   /**
-   * The area of this arc
+   * The area enclosed by this curve. Open arcs return `0`.
    */
-  get area() {
-    return this.closed
-      ? Math.PI * this.radius * this.radius
-      : Math.abs(this.deltaAngle * this.radius * this.radius)
+  get area(): number {
+    if (!this.closed) return 0
+    return Math.PI * this.radius * this.radius
   }
 
   /**
@@ -409,6 +409,44 @@ export class AcGeCircArc3d extends AcGeCurve3d {
   }
 
   /**
+   * Returns perpendicular snap point(s) on this arc from the given point.
+   *
+   * The snap point lies where the line from the query point to the arc is
+   * perpendicular to the arc (i.e. aligned with the radius at that point).
+   */
+  perpendicularPoints(point: AcGePoint3dLike): AcGePoint3d[] {
+    const result: AcGePoint3d[] = []
+
+    const P = new AcGeVector3d(point.x, point.y, point.z || 0)
+    const C = this.center
+    const n = this.normal
+    const r = this.radius
+
+    const v = P.clone().sub(C)
+    const distToPlane = v.dot(n)
+    const Pp = P.clone().sub(n.clone().multiplyScalar(distToPlane))
+    const dVec = Pp.clone().sub(C)
+
+    if (dVec.lengthSq() < 1e-24) return result
+
+    dVec.normalize()
+    const candidates = [
+      C.clone().add(dVec.clone().multiplyScalar(r)),
+      C.clone().sub(dVec.clone().multiplyScalar(r))
+    ]
+
+    for (const candidate of candidates) {
+      const angle = this.getAngle(candidate.clone())
+      const t = AcGeMathUtil.normalizeAngle(angle - this.startAngle)
+      if (t >= 0 && t <= this.deltaAngle) {
+        result.push(new AcGePoint3d(candidate.x, candidate.y, candidate.z || 0))
+      }
+    }
+
+    return result
+  }
+
+  /**
    * Returns the nearest tangent snap point, or null if none exists.
    */
   nearestTangentPoint(point: AcGePoint3dLike): AcGePoint3d | null {
@@ -488,26 +526,74 @@ export class AcGeCircArc3d extends AcGeCurve3d {
   }
 
   /**
+   * Sample this arc to a polyline whose chord height is bounded by `options`.
+   *
+   * @param options - Chord-height tessellation options
+   */
+  tessellate(options?: AcGeTessellateOptions): AcGePoint3d[] {
+    const sweep = this.closed ? TAU : this.deltaAngle
+    const numPoints = AcGeCircArc3d.segmentCount(this.radius, sweep, {
+      ...options,
+      minSegments: options?.minSegments ?? (this.closed ? 8 : 3)
+    })
+    return this.getPoints(numPoints)
+  }
+
+  /**
+   * Number of equal circular-arc segments whose chord height is at most the
+   * requested deviation. Delegates to {@link AcGeCircArc2d.segmentCount}.
+   */
+  static segmentCount(
+    radius: number,
+    sweep: number,
+    options?: AcGeTessellateOptions
+  ): number {
+    return AcGeCircArc2d.segmentCount(radius, sweep, options)
+  }
+
+  /**
    * @inheritdoc
    */
   transform(matrix: AcGeMatrix3d) {
-    const startVec = _vector3
-      .copy(this.refVec)
-      .applyAxisAngle(this.normal, this.startAngle)
-      .multiplyScalar(this.radius)
-    const endVec = _vector3
-      .copy(this.refVec)
-      .applyAxisAngle(this.normal, this.endAngle)
-      .multiplyScalar(this.radius)
+    const transformedCenter = this.center.clone().applyMatrix4(matrix)
+    const transformedStart = this.startPoint.clone().applyMatrix4(matrix)
+    const transformedEnd = this.endPoint.clone().applyMatrix4(matrix)
+    const referencePoint = this.getPointAtAngle(
+      this.closed ? Math.PI / 2 : this.startAngle + this.deltaAngle / 2
+    )
+      .clone()
+      .applyMatrix4(matrix)
 
-    this.center.applyMatrix4(matrix)
-    startVec.applyMatrix4(matrix)
-    endVec.applyMatrix4(matrix)
-    this.normal.applyMatrix4(matrix).normalize()
-    this.refVec.applyMatrix4(matrix).normalize()
+    const refVector = new AcGeVector3d(transformedStart)
+      .sub(transformedCenter)
+      .normalize()
+    const radius = transformedCenter.distanceTo(transformedStart)
 
-    this.startAngle = this.getAngle(startVec)
-    this.endAngle = this.getAngle(endVec)
+    let normal = new AcGeVector3d()
+      .crossVectors(
+        new AcGeVector3d(transformedStart).sub(transformedCenter),
+        new AcGeVector3d(referencePoint).sub(transformedCenter)
+      )
+      .normalize()
+
+    if (normal.lengthSq() === 0) {
+      normal = this.normal.clone().transformDirection(matrix)
+    }
+
+    const getAngle = (point: AcGePoint3d) => {
+      const vec = new AcGeVector3d(point).sub(transformedCenter)
+      return Math.atan2(
+        vec.dot(_vector3.crossVectors(normal, refVector)),
+        vec.dot(refVector)
+      )
+    }
+
+    this.center = transformedCenter
+    this.radius = radius
+    this.normal = normal
+    this.refVec = refVector
+    this.startAngle = 0
+    this.endAngle = this.closed ? TAU : getAngle(transformedEnd)
     this._boundingBoxNeedsUpdate = true
     return this
   }
@@ -586,6 +672,25 @@ export class AcGeCircArc3d extends AcGeCurve3d {
   get plane(): AcGePlane {
     const distance = new AcGeVector3d(this.center).distanceTo(ORIGIN_POINT_3D)
     return new AcGePlane(this.normal, distance)
+  }
+
+  /**
+   * Returns a concentric copy with radius adjusted by `offsetDist`.
+   *
+   * @param offsetDist - Signed offset distance in drawing units
+   * @returns Offset arc, or `null` when the resulting radius is not positive
+   */
+  offset(offsetDist: number): AcGeCircArc3d | null {
+    const radius = this.radius + offsetDist
+    if (radius <= 0) return null
+    return new AcGeCircArc3d(
+      this.center,
+      radius,
+      this.startAngle,
+      this.endAngle,
+      this.normal,
+      this.refVec
+    )
   }
 }
 

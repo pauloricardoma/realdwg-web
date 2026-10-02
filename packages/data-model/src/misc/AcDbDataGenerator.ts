@@ -1,17 +1,15 @@
 import { AcCmColor } from '@mlightcad/common'
 import { AcGeLine2d, AcGeLoop2d } from '@mlightcad/geometry-engine'
 
-import {
-  AcDbBlockTableRecord,
-  AcDbDatabase,
-  AcDbDimStyleTableRecord,
-  AcDbLayerTableRecord,
-  AcDbLinetypeTableRecord,
-  AcDbTextStyleTableRecord
-} from '../database'
-import { AcDbHatch } from '../entity'
-import { AcDbLayout } from '../object'
-import { DEFAULT_TEXT_STYLE } from './AcDbConstants'
+import { AcDbBlockTableRecord } from '../database/AcDbBlockTableRecord'
+import { AcDbDatabase } from '../database/AcDbDatabase'
+import { AcDbDimStyleTableRecord } from '../database/AcDbDimStyleTableRecord'
+import { AcDbLayerTableRecord } from '../database/AcDbLayerTableRecord'
+import { AcDbLinetypeTableRecord } from '../database/AcDbLinetypeTableRecord'
+import { AcDbTextStyleTableRecord } from '../database/AcDbTextStyleTableRecord'
+import { AcDbHatch } from '../entity/AcDbHatch'
+import { AcDbLayout } from '../object/layout/AcDbLayout'
+import { DEFAULT_TEXT_STYLE, HATCH_PATTERN_SOLID } from './AcDbConstants'
 
 export class AcDbDataGenerator {
   readonly db: AcDbDatabase
@@ -105,7 +103,7 @@ export class AcDbDataGenerator {
     if (!this.db.tables.blockTable.getAt(blockName)) {
       // Create arrow
       const hatch = new AcDbHatch()
-      hatch.patternName = 'SOLID'
+      hatch.patternName = HATCH_PATTERN_SOLID
       const loop = new AcGeLoop2d()
       loop.add(new AcGeLine2d({ x: 0, y: 0 }, { x: -1, y: 0.125 }))
       loop.add(new AcGeLine2d({ x: -1, y: 0.125 }, { x: -1, y: -0.125 }))

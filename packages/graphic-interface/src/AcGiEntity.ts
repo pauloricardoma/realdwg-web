@@ -1,24 +1,9 @@
-import { AcGeMatrix3d, AcGePoint3d } from '@mlightcad/geometry-engine'
+import { AcGeMatrix3d } from '@mlightcad/geometry-engine'
 
 /**
  * Interface that all of display objects need to implement.
  */
 export interface AcGiEntity {
-  /**
-   * JavaScript (and WebGL) use 64‑bit floating point numbers for CPU-side calculations,
-   * but GPU shaders typically use 32‑bit floats. A 32-bit float has ~7.2 decimal digits
-   * of precision. If passing 64-bit floating vertices data to GPU directly, it will
-   * destroy number preciesion.
-   *
-   * So we adopt a simpler but effective version of the "origin-shift" idea. Recompute
-   * geometry using re-centered coordinates and apply offset to its position. The base
-   * point is extractly offset value.
-   *
-   * Get the rendering base point.
-   * @returns Return the rendering base point.
-   */
-  get basePoint(): AcGePoint3d | undefined
-  set basePoint(value: AcGePoint3d | undefined)
   /**
    * Object id of the associated entity in drawing database. When adding this entity into scene,
    * do remember setting the value of this property.
@@ -58,24 +43,19 @@ export interface AcGiEntity {
   addChild(child: AcGiEntity): void
 
   /**
+   * Direct child count for group-like nodes.
+   *
+   * Used as a cheap heuristic before {@link compactForInstancing} (skip
+   * compaction for tiny templates). Leaf entities may omit this; callers treat
+   * a missing value as unknown and favor compacting.
+   */
+  readonly childCount?: number
+
+  /**
    * Apply the matrix transform to the object and updates the object's position, rotation and scale.
    * @param matrix Input the matrix to apply
    */
   applyMatrix(matrix: AcGeMatrix3d): void
-
-  /**
-   * Bakes the current object's transformation into all of its children and
-   * resets the object itself to an identity transform.
-   *
-   * After calling this function:
-   * - All children preserve their world-space appearance.
-   * - The object's local matrix and world matrix become identity.
-   * - The scene hierarchy remains unchanged.
-   *
-   * This is useful for freezing transforms, flattening transform hierarchies,
-   * or ensuring newly added children are not affected by previous transforms.
-   */
-  bakeTransformToChildren(): void
 
   /**
    * Highlight this entity.
@@ -91,9 +71,48 @@ export interface AcGiEntity {
    * Return a clone of this object and its direct children (not all descendants).
    * So it means that you need to gurantee the object is flatten by call method
    * 'flatten' before calling this function.
-   * This function will deeply clone geometry in this object. But materials are
-   * reused directly and not deeply cloned.
+   *
+   * Implementations may deep-clone geometry, or (for immutable block-template
+   * caches) alias leaf buffers and mark them so instance dispose skips them.
+   * Materials are reused and not deeply cloned.
+   *
+   * @param shareGeometry - When true, leaf drawables may alias source
+   *   geometry buffers instead of deep-cloning them.
    * @returns Return a clone of this object and optionally all descendants.
    */
-  fastDeepClone(): AcGiEntity
+  fastDeepClone(shareGeometry?: boolean): AcGiEntity
+
+  /**
+   * Optionally merges same-material drawable leaves so later
+   * {@link fastDeepClone} copies far fewer geometries.
+   *
+   * Used by block-reference template caching. Must be called before the INSERT
+   * transform is applied while the entity is still at identity. Implementations
+   * that do not support compaction may omit this method.
+   *
+   * @returns Nothing.
+   */
+  compactForInstancing?(): void
+
+  /**
+   * Optionally prepares this entity as an immutable block-template cache entry.
+   *
+   * Typical implementations finalize deferred drawables and drop detached
+   * source-entity shells without merging leaves. Used by rendering cache miss
+   * paths before {@link fastDeepClone} for scene use.
+   *
+   * @returns Nothing.
+   */
+  prepareCacheTemplate?(): void
+
+  /**
+   * Optionally releases GPU/CPU resources owned by this entity.
+   *
+   * Used when clearing the block rendering cache. Implementations that do not
+   * own disposable resources may omit this method. Shared materials from a
+   * style cache should not be disposed here unless the implementation owns them.
+   *
+   * @returns Nothing.
+   */
+  dispose?(): void
 }

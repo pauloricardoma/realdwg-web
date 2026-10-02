@@ -1,3 +1,4 @@
+import { AcCmColor } from '@mlightcad/common'
 import { AcGePoint2dLike } from '@mlightcad/geometry-engine'
 
 export interface AcGiHatchPatternLine {
@@ -7,6 +8,16 @@ export interface AcGiHatchPatternLine {
   dashLengths: number[]
 }
 
+export interface AcGiHatchGradientStyle {
+  name: string
+  angle: number
+  shift: number
+  oneColorMode: boolean
+  shadeTintValue: number
+  startColor?: number
+  endColor?: number
+}
+
 /**
  * Hatch style
  */
@@ -14,4 +25,6 @@ export interface AcGiHatchStyle {
   solidFill: boolean
   patternAngle: number
   definitionLines: AcGiHatchPatternLine[]
+  backgroundColor?: AcCmColor
+  gradient?: AcGiHatchGradientStyle
 }

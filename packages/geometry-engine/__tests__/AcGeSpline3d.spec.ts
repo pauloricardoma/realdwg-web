@@ -1,8 +1,8 @@
 import { AcGeSpline3d, AcGeKnotParameterizationType } from '../src'
 import { AcGePoint3d, AcGeBox3d, AcGeMatrix3d } from '../src'
 import {
-  computeParameterValues,
-  evaluateNurbsPoint
+  acgeComputeParameterValues,
+  acgeEvaluateNurbsPoint
 } from '../src/util/AcGeNurbsUtil'
 import { AcCmErrors } from '@mlightcad/common'
 
@@ -197,11 +197,11 @@ describe('AcGeSpline3d', () => {
       expect(endDerivative.y).toBeCloseTo(endTangent.y, 6)
       expect(endDerivative.z).toBeCloseTo(endTangent.z, 6)
 
-      const params = computeParameterValues(
+      const params = acgeComputeParameterValues(
         fitPoints.map(point => [point.x, point.y, point.z || 0]),
         'Uniform'
       )
-      const evaluatedMid = evaluateNurbsPoint(
+      const evaluatedMid = acgeEvaluateNurbsPoint(
         params[1],
         degree,
         knots,
@@ -248,6 +248,57 @@ describe('AcGeSpline3d', () => {
       expect(() => {
         new AcGeSpline3d([{ x: 0, y: 0, z: 0 }], [0, 0, 0, 0])
       }).toThrow(AcCmErrors.ILLEGAL_PARAMETERS)
+    })
+
+    it('covers constructor branch variants and argument guards', () => {
+      expect(() => new (AcGeSpline3d as any)([{ x: 0, y: 0, z: 0 }])).toThrow(
+        AcCmErrors.ILLEGAL_PARAMETERS
+      )
+
+      const controlPoints = [
+        { x: 0, y: 0, z: 0 },
+        { x: 1, y: 1, z: 0 },
+        { x: 2, y: 0, z: 0 },
+        { x: 3, y: 1, z: 0 }
+      ]
+      const knots = [0, 0, 0, 0, 1, 1, 1, 1]
+
+      expect(
+        () =>
+          new (AcGeSpline3d as any)(
+            controlPoints,
+            knots,
+            undefined,
+            3,
+            false,
+            'x'
+          )
+      ).toThrow(AcCmErrors.ILLEGAL_PARAMETERS)
+
+      const degreeClosed = new AcGeSpline3d(
+        controlPoints,
+        knots,
+        3 as any,
+        true as any
+      )
+      expect(degreeClosed.closed).toBe(true)
+
+      const fitPoints = [
+        { x: 0, y: 0, z: 0 },
+        { x: 1, y: 1, z: 0 },
+        { x: 2, y: 0, z: 0 },
+        { x: 3, y: 1, z: 0 }
+      ]
+      const tangentA = { x: 1, y: 0, z: 0 }
+      const tangentB = { x: 0, y: 1, z: 0 }
+      const fitWithTangents = new AcGeSpline3d(
+        fitPoints,
+        'Uniform',
+        3,
+        tangentA as any,
+        tangentB as any
+      )
+      expect(fitWithTangents.fitPoints?.length).toBe(4)
     })
 
     it('should throw error for insufficient control points for degree 4', () => {
@@ -564,6 +615,30 @@ describe('AcGeSpline3d', () => {
 
       expect(result).toBe(spline)
     })
+
+    it('covers fit/tangent transform branches and helper sampling', () => {
+      const fitPoints = [
+        { x: 0, y: 0, z: 0 },
+        { x: 1, y: 1, z: 0 },
+        { x: 2, y: 0, z: 0 },
+        { x: 3, y: 1, z: 0 }
+      ]
+      const spline = new AcGeSpline3d(
+        fitPoints,
+        'Uniform',
+        3,
+        false,
+        { x: 1, y: 0, z: 0 },
+        { x: 0, y: 1, z: 0 }
+      )
+      spline.closed = false
+      expect(
+        spline.transform(new AcGeMatrix3d().makeTranslation(2, 0, 0))
+      ).toBe(spline)
+
+      const sampled = spline.getCurvePoints((spline as any)._nurbsCurve, 5)
+      expect(sampled).toHaveLength(5)
+    })
   })
 
   describe('Edge Cases', () => {
@@ -668,6 +743,99 @@ describe('AcGeSpline3d', () => {
       expect(() => {
         AcGeSpline3d.createClosedSpline(fitPoints)
       }).toThrow('At least 4 points are required for a degree 3 closed spline')
+    })
+  })
+
+  describe('Clone', () => {
+    it('clones control-point spline deeply', () => {
+      const spline = new AcGeSpline3d(
+        [
+          { x: 0, y: 0, z: 0 },
+          { x: 1, y: 1, z: 0 },
+          { x: 2, y: 0, z: 0 },
+          { x: 3, y: 1, z: 0 }
+        ],
+        [0, 0, 0, 0, 1, 1, 1, 1]
+      )
+
+      const cloned = spline.clone()
+      expect(cloned).not.toBe(spline)
+      expect(cloned.controlPoints).toEqual(spline.controlPoints)
+
+      const changed = cloned.getControlPointAt(0)
+      changed.x = 99
+      expect(spline.getControlPointAt(0).x).toBe(0)
+    })
+
+    it('clones fit-point spline and keeps constructor mode', () => {
+      const spline = new AcGeSpline3d(
+        [
+          { x: 0, y: 0, z: 0 },
+          { x: 1, y: 1, z: 0 },
+          { x: 2, y: 0, z: 0 },
+          { x: 3, y: 1, z: 0 }
+        ],
+        'Uniform',
+        3,
+        false,
+        { x: 1, y: 0, z: 0 },
+        { x: 0, y: 1, z: 0 }
+      )
+
+      const cloned = spline.clone()
+      expect(cloned.fitPoints).toEqual(spline.fitPoints)
+      expect(cloned.knotParameterization).toBe('Uniform')
+    })
+  })
+
+  describe('getOffsetSamplePath2d', () => {
+    it('returns more samples in high-curvature regions', () => {
+      const spline = new AcGeSpline3d(
+        [
+          new AcGePoint3d(0, 0, 0),
+          new AcGePoint3d(10, 8, 0),
+          new AcGePoint3d(20, -8, 0),
+          new AcGePoint3d(30, 8, 0),
+          new AcGePoint3d(40, 0, 0)
+        ],
+        [0, 0, 0, 0, 0.5, 1, 1, 1, 1]
+      )
+
+      const path = spline.getOffsetSamplePath2d(2)
+
+      expect(path.points.length).toBeGreaterThan(64)
+      expect(path.tangents).toHaveLength(path.points.length)
+      path.tangents.forEach(tangent => {
+        expect(Math.hypot(tangent.x, tangent.y)).toBeCloseTo(1, 4)
+      })
+    })
+  })
+
+  describe('area', () => {
+    it('computes area for closed spline and returns 0 when open', () => {
+      const closed = new AcGeSpline3d(
+        [
+          new AcGePoint3d(0, 0, 0),
+          new AcGePoint3d(10, 0, 0),
+          new AcGePoint3d(10, 10, 0),
+          new AcGePoint3d(0, 10, 0)
+        ],
+        'Uniform',
+        3,
+        true
+      )
+      expect(closed.area).toBeGreaterThan(0)
+
+      const open = new AcGeSpline3d(
+        [
+          new AcGePoint3d(0, 0, 0),
+          new AcGePoint3d(10, 0, 0),
+          new AcGePoint3d(10, 5, 0),
+          new AcGePoint3d(20, 5, 0)
+        ],
+        'Uniform'
+      )
+      expect(open.area).toBe(0)
     })
   })
 })

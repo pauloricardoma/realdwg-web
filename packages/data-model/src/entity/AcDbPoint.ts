@@ -3,14 +3,18 @@ import {
   AcGeMatrix3d,
   AcGePoint3d,
   AcGePoint3dLike,
-  AcGePointLike
-} from '@mlightcad/geometry-engine'
+  AcGePointLike,
+  acgeTransformOcsPointToWcs,
+  acgeTransformWcsPointToOcs,
+  AcGeVector3d,
+  AcGeVector3dLike} from '@mlightcad/geometry-engine'
 import { AcGiRenderer } from '@mlightcad/graphic-interface'
 
-import { AcDbDxfFiler } from '../base'
-import { AcDbOsnapMode } from '../misc'
+import { AcDbDxfFiler } from '../base/AcDbDxfFiler'
+import { AcDbOsnapMode } from '../misc/AcDbOsnapMode'
 import { AcDbEntity } from './AcDbEntity'
 import { AcDbEntityProperties } from './AcDbEntityProperties'
+import { acdbMovePrimaryGripPointAt } from './AcDbGripHelpers'
 
 /**
  * Represents a point entity in AutoCAD.
@@ -43,6 +47,15 @@ export class AcDbPoint extends AcDbEntity {
 
   /** The underlying geometric point object */
   private _geo: AcGePoint3d
+  /** Thickness along the normal (DXF group 39) */
+  private _thickness = 0
+  /** Extrusion / plane normal (DXF group 210) */
+  private _normal = new AcGeVector3d(0, 0, 1)
+  /**
+   * Angle of the X axis for the UCS in effect when the point was drawn
+   * (DXF group 50). Used when PDMODE is nonzero.
+   */
+  private _ecsRotation = 0
 
   /**
    * Creates a new point entity.
@@ -91,6 +104,37 @@ export class AcDbPoint extends AcDbEntity {
   }
 
   /**
+   * Thickness along the entity normal (DXF group 39).
+   */
+  get thickness() {
+    return this._thickness
+  }
+  set thickness(value: number) {
+    this._thickness = value
+  }
+
+  /**
+   * Extrusion direction / plane normal (DXF group 210).
+   */
+  get normal(): AcGeVector3d {
+    return this._normal
+  }
+  set normal(value: AcGeVector3dLike) {
+    this._normal.copy(value)
+  }
+
+  /**
+   * Angle of the X axis for the UCS in effect when the point was drawn
+   * (DXF group 50), in radians.
+   */
+  get ecsRotation() {
+    return this._ecsRotation
+  }
+  set ecsRotation(value: number) {
+    this._ecsRotation = value
+  }
+
+  /**
    * Gets the geometric extents (bounding box) of this point.
    *
    * For a point, the bounding box is a minimal box that contains just the point.
@@ -119,13 +163,28 @@ export class AcDbPoint extends AcDbEntity {
    * @param _lastPoint - The last point
    * @param snapPoints - Array to populate with snap points
    */
+  /**
+   * Gets the grip points for this point entity.
+   *
+   * @returns Array containing the point position.
+   */
+  subGetGripPoints() {
+    return [this._geo]
+  }
+
+  /** @inheritdoc */
+  subMoveGripPointsAt(indices: number[], offset: AcGeVector3dLike) {
+    acdbMovePrimaryGripPointAt(indices, offset, this._geo)
+    return this
+  }
+
   subGetOsnapPoints(
     osnapMode: AcDbOsnapMode,
     _pickPoint: AcGePoint3dLike,
     _lastPoint: AcGePoint3dLike,
     snapPoints: AcGePoint3dLike[]
   ) {
-    if (AcDbOsnapMode.Node === osnapMode) {
+    if (osnapMode === AcDbOsnapMode.Node) {
       snapPoints.push(this._geo)
     }
   }
@@ -209,6 +268,17 @@ export class AcDbPoint extends AcDbEntity {
   }
 
   /**
+   * Only the simple PDMODE dot (0) is a single `THREE.Points` drawable.
+   * Other modes emit symbol LineSegments and stay on the legacy path.
+   *
+   * @internal
+   */
+  override get directBatchPrimitive() {
+    const mode = this.database?.pdmode ?? 0
+    return mode === 0 ? ('point' as const) : null
+  }
+
+  /**
    * Draws this point using the specified renderer.
    *
    * This method renders the point using the point's current style properties,
@@ -233,7 +303,73 @@ export class AcDbPoint extends AcDbEntity {
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
     filer.writeSubclassMarker('AcDbPoint')
-    filer.writePoint3d(10, this.position)
+    if (this.thickness !== 0) {
+      filer.writeDouble(39, this.thickness)
+    }
+    filer.writePoint3d(10, acgeTransformWcsPointToOcs(this.position, this.normal))
+    if (this.ecsRotation !== 0) {
+      filer.writeAngle(50, this.ecsRotation)
+    }
+    filer.writeVector3d(210, this.normal)
+    return this
+  }
+
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    filer.atSubclassData('AcDbPoint')
+
+    let x = this.position.x
+    let y = this.position.y
+    let z = this.position.z
+    let thickness = this.thickness
+    let angleDeg = (this.ecsRotation * 180) / Math.PI
+    let nx = this.normal.x
+    let ny = this.normal.y
+    let nz = this.normal.z
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      const n = Number(item.value)
+      switch (code) {
+        case 10:
+          x = n
+          break
+        case 20:
+          y = n
+          break
+        case 30:
+          z = n
+          break
+        case 39:
+          thickness = n
+          break
+        case 50:
+          angleDeg = n
+          break
+        case 210:
+          nx = n
+          break
+        case 220:
+          ny = n
+          break
+        case 230:
+          nz = n
+          break
+        default:
+          break
+      }
+    }
+
+    const normal = new AcGeVector3d(nx, ny, nz)
+    if (normal.lengthSq() > 0) {
+      this.normal.copy(normal.normalize())
+    }
+    this.thickness = thickness
+    this.ecsRotation = (angleDeg * Math.PI) / 180
+    this.position = acgeTransformOcsPointToWcs({ x, y, z }, this.normal)
     return this
   }
 }
+

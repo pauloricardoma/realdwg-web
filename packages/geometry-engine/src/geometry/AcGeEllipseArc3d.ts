@@ -5,13 +5,17 @@ import {
   AcGeMatrix3d,
   AcGePlane,
   AcGePoint3d,
+  AcGePoint3dLike,
   AcGePointLike,
   AcGeVector3d,
   AcGeVector3dLike
 } from '../math'
-import { AcGeMathUtil, ORIGIN_POINT_3D, TAU } from '../util'
+import { AcGeMathUtil, FLOAT_TOL, ORIGIN_POINT_3D, TAU } from '../util'
 import { AcGeTol } from '../util/AcGeTol'
+import { AcGeCircArc2d } from './AcGeCircArc2d'
+import { AcGeCircArc3d } from './AcGeCircArc3d'
 import { AcGeCurve3d } from './AcGeCurve3d'
+import type { AcGeTessellateOptions } from './AcGeCurveTessellate'
 
 /**
  * Class representing a 3d ellipse arc defined by center, normal, majorAxis, majorAxisRadius,
@@ -274,28 +278,11 @@ export class AcGeEllipseArc3d extends AcGeCurve3d {
   }
 
   /**
-   * Compute the area of the ellipse or ellipse arc.
-   * - Full ellipse: π * a * b
-   * - Ellipse arc: exact analytical area (not numerical integration)
+   * The area enclosed by this curve. Open ellipse arcs return `0`.
    */
   get area(): number {
-    const a = this.majorAxisRadius
-    const b = this.minorAxisRadius
-
-    const t1 = this.startAngle
-    const t2 = t1 + this.deltaAngle
-
-    // Full ellipse
-    if (Math.abs(this.deltaAngle - TAU) < 1e-10) {
-      return Math.PI * a * b
-    }
-
-    const area =
-      ((a * b) / 2) *
-      (t2 - t1 - (Math.sin(t2) * Math.cos(t2) - Math.sin(t1) * Math.cos(t1)))
-
-    // Always return positive area
-    return Math.abs(area)
+    if (Math.abs(this.deltaAngle - TAU) >= 1e-10) return 0
+    return Math.PI * this.majorAxisRadius * this.minorAxisRadius
   }
 
   /**
@@ -392,6 +379,43 @@ export class AcGeEllipseArc3d extends AcGeCurve3d {
   }
 
   /**
+   * Sample this ellipse to a polyline whose chord height is bounded by `options`.
+   *
+   * Circular ellipses use the closed-form circular segment count. Non-circular
+   * ellipses use coarse sampling plus local refinement with an evaluation budget.
+   *
+   * @param options - Chord-height tessellation options
+   */
+  tessellate(options?: AcGeTessellateOptions): AcGePoint3d[] {
+    const resolved = AcGeCircArc2d.resolveTessellateOptions(options)
+    const sweep = this.closed ? TAU : this.deltaAngle
+    const radius = Math.max(this.majorAxisRadius, this.minorAxisRadius)
+    const isFull = Math.abs(sweep) >= TAU - 1e-8
+    const minSegments = resolved.minSegments ?? (isFull ? 8 : 3)
+    if (this.isCircular) {
+      const numPoints = AcGeCircArc3d.segmentCount(radius, sweep, {
+        ...options,
+        minSegments
+      })
+      return this.getPoints(numPoints)
+    }
+    const deviation =
+      resolved.deviation ??
+      AcGeCircArc2d.chordDeviationFromRadius(radius, resolved.circleSides)
+    const startAngle = this.closed ? 0 : this.startAngle
+    return AcGeCurve3d.tessellateParametricCurve(
+      startAngle,
+      startAngle + sweep,
+      angle => this.getPointAtAngle(angle),
+      {
+        deviation: Math.max(FLOAT_TOL, deviation),
+        minSegments,
+        maxSegments: resolved.maxSegments
+      }
+    )
+  }
+
+  /**
    * Calculate a point on the ellipse at a given angle.
    * @param angle Input the angle in radians where the point is to be calculated.
    * @returns Return the 3d coordinates of the point on the ellipse.
@@ -413,6 +437,116 @@ export class AcGeEllipseArc3d extends AcGeCurve3d {
       this.center.y + point.y,
       this.center.z + point.z
     )
+  }
+
+  /**
+   * Returns the nearest point on this ellipse arc to the given point.
+   *
+   * Uses uniform sampling in parameter space, which is sufficient for object snap.
+   *
+   * @param point - Query point in WCS.
+   * @param samples - Number of interior samples along the arc span.
+   */
+  nearestPoint(point: AcGePointLike, samples = 72): AcGePoint3d {
+    const query = new AcGePoint3d(point.x, point.y, point.z || 0)
+    let best = this.getPointAtAngle(this.startAngle)
+    let bestDistSq = query.distanceToSquared(best)
+
+    for (let i = 1; i <= samples; i++) {
+      const angle = this.startAngle + (this.deltaAngle * i) / samples
+      const candidate = this.getPointAtAngle(angle)
+      const distSq = query.distanceToSquared(candidate)
+      if (distSq < bestDistSq) {
+        bestDistSq = distSq
+        best = candidate
+      }
+    }
+
+    const dStart = query.distanceToSquared(this.startPoint)
+    const dEnd = query.distanceToSquared(this.endPoint)
+    if (dStart < bestDistSq && dStart <= dEnd) return this.startPoint.clone()
+    if (dEnd < bestDistSq && dEnd < dStart) return this.endPoint.clone()
+
+    return best.clone()
+  }
+
+  /**
+   * Returns tangent snap point(s) from the given point to this ellipse arc.
+   */
+  tangentPoints(point: AcGePoint3dLike): AcGePoint3d[] {
+    const localP = this._projectPointToLocalPlane(point)
+    const angles = this._findSnapParameterAngles((qx, qy, cos, sin) => {
+      const tx = -this.majorAxisRadius * sin
+      const ty = this.minorAxisRadius * cos
+      return (qx - localP.x) * ty - (qy - localP.y) * tx
+    })
+    return angles.map(angle => this.getPointAtAngle(angle))
+  }
+
+  /**
+   * Returns perpendicular snap point(s) on this ellipse arc from the given point.
+   */
+  perpendicularPoints(point: AcGePoint3dLike): AcGePoint3d[] {
+    const localP = this._projectPointToLocalPlane(point)
+    const angles = this._findSnapParameterAngles((qx, qy, cos, sin) => {
+      const nx = this.minorAxisRadius * cos
+      const ny = this.majorAxisRadius * sin
+      return (qx - localP.x) * ny - (qy - localP.y) * nx
+    })
+    return angles.map(angle => this.getPointAtAngle(angle))
+  }
+
+  private _projectPointToLocalPlane(point: AcGePoint3dLike): {
+    x: number
+    y: number
+  } {
+    const query = new AcGePoint3d(point.x, point.y, point.z || 0)
+    const offset = new AcGeVector3d(query).sub(this.center)
+    const distToPlane = offset.dot(this.normal)
+    offset.sub(this.normal.clone().multiplyScalar(distToPlane))
+    return {
+      x: offset.dot(this.majorAxis),
+      y: offset.dot(this.minorAxis)
+    }
+  }
+
+  private _findSnapParameterAngles(
+    errorAt: (qx: number, qy: number, cos: number, sin: number) => number,
+    samples = 144
+  ): number[] {
+    const a = this.majorAxisRadius
+    const b = this.minorAxisRadius
+    const start = this.startAngle
+    const delta = this.deltaAngle
+    const angles: number[] = []
+
+    const evalError = (theta: number) => {
+      const cos = Math.cos(theta)
+      const sin = Math.sin(theta)
+      return errorAt(a * cos, b * sin, cos, sin)
+    }
+
+    let prevT = start
+    let prevE = evalError(prevT)
+    for (let i = 1; i <= samples; i++) {
+      const t = start + (delta * i) / samples
+      const e = evalError(t)
+      if (Math.abs(prevE) < 1e-10) angles.push(prevT)
+      if (prevE * e < 0) {
+        let lo = prevT
+        let hi = t
+        for (let j = 0; j < 32; j++) {
+          const mid = (lo + hi) / 2
+          if (evalError(lo) * evalError(mid) <= 0) hi = mid
+          else lo = mid
+        }
+        angles.push((lo + hi) / 2)
+      }
+      prevT = t
+      prevE = e
+    }
+
+    return angles
   }
 
   /**
@@ -440,6 +574,74 @@ export class AcGeEllipseArc3d extends AcGeCurve3d {
    * @inheritdoc
    */
   transform(_matrix: AcGeMatrix3d) {
+    const matrix = _matrix
+    const transformedCenter = this.center.clone().applyMatrix4(matrix)
+    const transformedMajorPoint = this.getPointAtAngle(0)
+      .clone()
+      .applyMatrix4(matrix)
+    const transformedMinorPoint = this.getPointAtAngle(Math.PI / 2)
+      .clone()
+      .applyMatrix4(matrix)
+
+    const majorVector = new AcGeVector3d(transformedMajorPoint).sub(
+      transformedCenter
+    )
+    const transformedMinorVector = new AcGeVector3d(transformedMinorPoint).sub(
+      transformedCenter
+    )
+
+    const majorAxisRadius = majorVector.length()
+    const minorAxisRadius = transformedMinorVector.length()
+    const majorAxis = majorVector.clone().normalize()
+
+    const normal = new AcGeVector3d()
+      .crossVectors(majorVector, transformedMinorVector)
+      .normalize()
+    let minorAxis = new AcGeVector3d()
+      .crossVectors(normal, majorAxis)
+      .normalize()
+
+    if (minorAxis.dot(transformedMinorVector) < 0) {
+      normal.negate()
+      minorAxis = new AcGeVector3d().crossVectors(normal, majorAxis).normalize()
+    }
+
+    const getAngle = (point: AcGePoint3d) => {
+      const relative = new AcGeVector3d(point).sub(transformedCenter)
+      const x = relative.dot(majorAxis)
+      const y = relative.dot(minorAxis)
+      return AcGeMathUtil.normalizeAngle(
+        Math.atan2(y / minorAxisRadius, x / majorAxisRadius)
+      )
+    }
+
+    const transformedEllipse = this.closed
+      ? new AcGeEllipseArc3d(
+          transformedCenter,
+          normal,
+          majorAxis,
+          majorAxisRadius,
+          minorAxisRadius,
+          0,
+          TAU
+        )
+      : new AcGeEllipseArc3d(
+          transformedCenter,
+          normal,
+          majorAxis,
+          majorAxisRadius,
+          minorAxisRadius,
+          getAngle(this.startPoint.clone().applyMatrix4(matrix)),
+          getAngle(this.endPoint.clone().applyMatrix4(matrix))
+        )
+
+    this.center = transformedEllipse.center
+    this.normal = transformedEllipse.normal
+    this.majorAxis = transformedEllipse.majorAxis
+    this.majorAxisRadius = transformedEllipse.majorAxisRadius
+    this.minorAxisRadius = transformedEllipse.minorAxisRadius
+    this._startAngle = transformedEllipse._startAngle
+    this._endAngle = transformedEllipse._endAngle
     this._boundingBoxNeedsUpdate = true
     return this
   }
@@ -480,5 +682,26 @@ export class AcGeEllipseArc3d extends AcGeCurve3d {
   get plane(): AcGePlane {
     const distance = new AcGeVector3d(this.center).distanceTo(ORIGIN_POINT_3D)
     return new AcGePlane(this.normal, distance)
+  }
+
+  /**
+   * Returns a copy with major and minor radii adjusted by `offsetDist`.
+   *
+   * @param offsetDist - Signed offset distance in drawing units
+   * @returns Offset ellipse arc, or `null` when either radius is not positive
+   */
+  offset(offsetDist: number): AcGeEllipseArc3d | null {
+    const majorAxisRadius = this.majorAxisRadius + offsetDist
+    const minorAxisRadius = this.minorAxisRadius + offsetDist
+    if (majorAxisRadius <= 0 || minorAxisRadius <= 0) return null
+    return new AcGeEllipseArc3d(
+      this.center,
+      this.normal,
+      this.majorAxis,
+      majorAxisRadius,
+      minorAxisRadius,
+      this.startAngle,
+      this.endAngle
+    )
   }
 }

@@ -1,8 +1,17 @@
-import { AcGeEllipseArc2d, AcGeSpline3d } from '../geometry'
-import { AcGeBox2d, AcGeMatrix2d, AcGePoint2d, AcGePoint3d } from '../math'
+import {
+  AcGeBox2d,
+  AcGeMatrix2d,
+  AcGeMatrix3d,
+  AcGePoint2d,
+  AcGePoint3d
+} from '../math'
+import { AcGeMathUtil, FLOAT_TOL, TAU } from '../util'
 import { AcGeCircArc2d } from './AcGeCircArc2d'
 import { AcGeCurve2d } from './AcGeCurve2d'
+import type { AcGeTessellateOptions } from './AcGeCurveTessellate'
+import { AcGeEllipseArc2d } from './AcGeEllipseArc2d'
 import { AcGeLine2d } from './AcGeLine2d'
+import { AcGeSpline3d } from './AcGeSpline3d'
 
 export type AcGeBoundaryEdgeType =
   | AcGeLine2d
@@ -155,10 +164,43 @@ export class AcGeLoop2d extends AcGeCurve2d {
   /**
    * @inheritdoc
    */
-  transform(_matrix: AcGeMatrix2d) {
-    // TODO: implement it
+  transform(matrix: AcGeMatrix2d) {
+    const matrix3d = new AcGeMatrix3d().set(
+      matrix.elements[0],
+      matrix.elements[3],
+      0,
+      matrix.elements[6],
+      matrix.elements[1],
+      matrix.elements[4],
+      0,
+      matrix.elements[7],
+      0,
+      0,
+      1,
+      0,
+      0,
+      0,
+      0,
+      1
+    )
+
+    this._curves.forEach(curve => {
+      if (curve instanceof AcGeSpline3d) {
+        curve.transform(matrix3d)
+      } else {
+        curve.transform(matrix)
+      }
+    })
+
     this._boundingBoxNeedsUpdate = true
     return this
+  }
+
+  /**
+   * Return a deep-cloned copy of this loop.
+   */
+  clone() {
+    return new AcGeLoop2d(this._curves.map(curve => curve.clone()))
   }
 
   /**
@@ -177,6 +219,33 @@ export class AcGeLoop2d extends AcGeCurve2d {
     const points: AcGePoint2d[] = []
     this.curves.forEach(curve => {
       curve.getPoints(numPoints).forEach((point: AcGePoint2d | AcGePoint3d) => {
+        points.push(new AcGePoint2d(point.x, point.y))
+      })
+    })
+    return points
+  }
+
+  /**
+   * Sample this loop for display using per-edge chord-height tessellation.
+   *
+   * Straight edges emit endpoints only. Circular arcs and splines use
+   * {@link AcGeCircArc2d.tessellate} / {@link AcGeSpline3d.tessellate}.
+   * Elliptical edges choose a segment count from the same chord-height formula.
+   *
+   * @param options - Chord-height tessellation options
+   */
+  tessellate(options?: AcGeTessellateOptions): AcGePoint2d[] {
+    const points: AcGePoint2d[] = []
+    this._curves.forEach(curve => {
+      tessellateLoopEdge(curve, options).forEach(point => {
+        const last = points[points.length - 1]
+        if (
+          last &&
+          (last.x - point.x) ** 2 + (last.y - point.y) ** 2 <=
+            FLOAT_TOL * FLOAT_TOL
+        ) {
+          return
+        }
         points.push(new AcGePoint2d(point.x, point.y))
       })
     })
@@ -257,13 +326,7 @@ export class AcGeLoop2d extends AcGeCurve2d {
       return new AcGeLine2d(edge.endPoint, edge.startPoint)
     }
     if (edge instanceof AcGeCircArc2d) {
-      return new AcGeCircArc2d(
-        edge.center,
-        edge.radius,
-        edge.endAngle,
-        edge.startAngle,
-        !edge.clockwise
-      )
+      return AcGeLoop2d.reverseCircArcEdge(edge)
     }
     if (edge instanceof AcGeEllipseArc2d) {
       return new AcGeEllipseArc2d(
@@ -281,6 +344,42 @@ export class AcGeLoop2d extends AcGeCurve2d {
       return AcGeLoop2d.reverseSplineEdge(edge)
     }
     return edge
+  }
+
+  /**
+   * Reverse a circular arc while preserving physical endpoints.
+   *
+   * `AcGeCircArc2d` uses mirrored public angles when `clockwise` is true, so simply
+   * swapping `startAngle`/`endAngle` and flipping `clockwise` produces a reflected
+   * complementary arc. Rebuild from physical endpoint angles instead.
+   */
+  private static reverseCircArcEdge(edge: AcGeCircArc2d): AcGeCircArc2d {
+    const start = edge.startPoint
+    const end = edge.endPoint
+    const newClockwise = !edge.clockwise
+    // New start is the old end; new end is the old start.
+    const physicalStartAngle = Math.atan2(
+      end.y - edge.center.y,
+      end.x - edge.center.x
+    )
+    const physicalEndAngle = Math.atan2(
+      start.y - edge.center.y,
+      start.x - edge.center.x
+    )
+    // Match AcGeCircArc2d clockwise public-angle convention (mirror ≈ negation).
+    const toPublicAngle = (angle: number) => {
+      const normalized = AcGeMathUtil.normalizeAngle(angle)
+      return newClockwise
+        ? AcGeMathUtil.normalizeAngle(-normalized)
+        : normalized
+    }
+    return new AcGeCircArc2d(
+      edge.center,
+      edge.radius,
+      toPublicAngle(physicalStartAngle),
+      toPublicAngle(physicalEndAngle),
+      newClockwise
+    )
   }
 
   /**
@@ -308,4 +407,26 @@ export class AcGeLoop2d extends AcGeCurve2d {
       edge.closed
     )
   }
+}
+
+function tessellateLoopEdge(
+  curve: AcGeBoundaryEdgeType,
+  options?: AcGeTessellateOptions
+): Array<{ x: number; y: number }> {
+  if (curve instanceof AcGeLine2d) {
+    return curve.getPoints()
+  }
+  if (curve instanceof AcGeCircArc2d) {
+    return curve.tessellate(options)
+  }
+  if (curve instanceof AcGeSpline3d) {
+    return curve.tessellate(options)
+  }
+  const sweep = curve.closed ? TAU : curve.deltaAngle
+  const n = AcGeCircArc2d.segmentCount(
+    Math.max(curve.majorAxisRadius, curve.minorAxisRadius),
+    sweep,
+    options
+  )
+  return curve.getPoints(n)
 }

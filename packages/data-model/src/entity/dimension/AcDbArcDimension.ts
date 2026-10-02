@@ -1,10 +1,11 @@
 import {
-  AcGeBox3d,
+  AcGeMatrix3d,
   AcGePoint3d,
   AcGePoint3dLike
 } from '@mlightcad/geometry-engine'
 
 import { AcDbDxfFiler } from '../../base'
+import { AcDbEntityProperties } from '../AcDbEntityProperties'
 import { AcDbDimension } from './AcDbDimension'
 
 /**
@@ -126,6 +127,51 @@ export class AcDbArcDimension extends AcDbDimension {
     this._xLine2Point.copy(value)
   }
 
+  override get properties(): AcDbEntityProperties {
+    const baseProperties = this.getBaseProperties()
+    return {
+      type: this.type,
+      groups: [
+        ...baseProperties.groups,
+        {
+          groupName: 'geometry',
+          properties: [
+            ...this.createPoint3dProperties(
+              'centerPoint',
+              () => this.centerPoint
+            ),
+            ...this.createPoint3dProperties(
+              'xLine1Point',
+              () => this.xLine1Point
+            ),
+            ...this.createPoint3dProperties(
+              'xLine2Point',
+              () => this.xLine2Point
+            ),
+            ...this.createPoint3dProperties('arcPoint', () => this.arcPoint)
+          ]
+        }
+      ]
+    }
+  }
+
+  /**
+   * @inheritdoc
+   */
+  protected override collectDimensionDefinitionGripPoints() {
+    return [this.centerPoint, this.xLine1Point, this.xLine2Point, this.arcPoint]
+  }
+
+  /**
+   * @inheritdoc
+   */
+  protected override subTransformBy(matrix: AcGeMatrix3d) {
+    this._arcPoint.applyMatrix4(matrix)
+    this._centerPoint.applyMatrix4(matrix)
+    this._xLine1Point.applyMatrix4(matrix)
+    this._xLine2Point.applyMatrix4(matrix)
+  }
+
   /**
    * Gets the geometric extents (bounding box) of this dimension entity.
    *
@@ -137,8 +183,12 @@ export class AcDbArcDimension extends AcDbDimension {
    * @inheritdoc
    */
   get geometricExtents() {
-    // TODO: Finish it
-    return new AcGeBox3d()
+    return this.getGeometricExtentsFromDimBlockOrPoints([
+      this.xLine1Point,
+      this.xLine2Point,
+      this.centerPoint,
+      this.arcPoint
+    ])
   }
 
   /**
@@ -154,6 +204,76 @@ export class AcDbArcDimension extends AcDbDimension {
     filer.writePoint3d(14, this.xLine2Point)
     filer.writePoint3d(15, this.centerPoint)
     filer.writePoint3d(16, this.arcPoint)
+    return this
+  }
+
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    filer.atSubclassData('AcDbArcDimension')
+
+    let x1 = this.xLine1Point.x
+    let y1 = this.xLine1Point.y
+    let z1 = this.xLine1Point.z
+    let x2 = this.xLine2Point.x
+    let y2 = this.xLine2Point.y
+    let z2 = this.xLine2Point.z
+    let cx = this.centerPoint.x
+    let cy = this.centerPoint.y
+    let cz = this.centerPoint.z
+    let ax = this.arcPoint.x
+    let ay = this.arcPoint.y
+    let az = this.arcPoint.z
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      const n = Number(item.value)
+      switch (code) {
+        case 13:
+          x1 = n
+          break
+        case 23:
+          y1 = n
+          break
+        case 33:
+          z1 = n
+          break
+        case 14:
+          x2 = n
+          break
+        case 24:
+          y2 = n
+          break
+        case 34:
+          z2 = n
+          break
+        case 15:
+          cx = n
+          break
+        case 25:
+          cy = n
+          break
+        case 35:
+          cz = n
+          break
+        case 16:
+          ax = n
+          break
+        case 26:
+          ay = n
+          break
+        case 36:
+          az = n
+          break
+        default:
+          break
+      }
+    }
+    this.xLine1Point = new AcGePoint3d(x1, y1, z1)
+    this.xLine2Point = new AcGePoint3d(x2, y2, z2)
+    this.centerPoint = new AcGePoint3d(cx, cy, cz)
+    this.arcPoint = new AcGePoint3d(ax, ay, az)
     return this
   }
 }

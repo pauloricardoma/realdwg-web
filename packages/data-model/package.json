@@ -1,6 +1,6 @@
 {
   "name": "@mlightcad/data-model",
-  "version": "1.7.15",
+  "version": "1.15.1",
   "license": "MIT",
   "type": "module",
   "repository": {
@@ -23,31 +23,31 @@
     "README.md",
     "package.json"
   ],
+  "sideEffects": [
+    "./lib/base/AcDbHostApplicationServices.js"
+  ],
   "main": "./dist/data-model.cjs",
-  "module": "./dist/data-model.js",
+  "module": "./lib/index.js",
   "types": "./lib/index.d.ts",
   "exports": {
     "types": "./lib/index.d.ts",
-    "import": "./dist/data-model.js",
+    "import": "./lib/index.js",
     "require": "./dist/data-model.cjs"
   },
   "scripts": {
-    "analyze": "pnpm run analyze:lib && pnpm run analyze:worker",
+    "analyze": "pnpm run analyze:lib",
     "analyze:lib": "vite build --mode analyze --config vite.config.main.ts",
-    "analyze:worker": "vite build --mode analyze --config vite.config.worker.ts",
     "clean": "rimraf dist lib tsconfig.tsbuildinfo",
-    "build": "tsc && pnpm run build:lib && pnpm run build:worker",
+    "build": "tsc && pnpm run build:lib",
     "build:lib": "vite build --config vite.config.main.ts",
-    "build:worker": "vite build --config vite.config.worker.ts",
     "lint": "eslint src/",
     "lint:fix": "eslint --fix --quiet src/"
   },
   "dependencies": {
     "@mlightcad/common": "workspace:*",
-    "@mlightcad/dxf-json": "1.1.3",
+    "@mlightcad/emf-converter": "workspace:*",
     "@mlightcad/geometry-engine": "workspace:*",
     "@mlightcad/graphic-interface": "workspace:*",
-    "iconv-lite": "^0.7.0",
     "uid": "^2.0.2"
   }
 }

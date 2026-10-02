@@ -1,9 +1,10 @@
-import { AcDbBlockTableRecord, AcDbDatabase } from '../database'
+import { AcDbBlockTableRecord } from '../database/AcDbBlockTableRecord'
+import { AcDbDatabase } from '../database/AcDbDatabase'
 import {
   AcDbConversionProgressCallback,
   AcDbDatabaseConverter
 } from '../database/AcDbDatabaseConverter'
-import { AcDbEntity } from '../entity'
+import { AcDbEntity } from '../entity/AcDbEntity'
 import { AcDbBatchProcessing } from './AcDbBatchProcessing'
 
 /**
@@ -33,15 +34,6 @@ export class AcDbRegenerator extends AcDbDatabaseConverter<AcDbDatabase> {
         unknownEntityCount: 0
       }
     }
-  }
-
-  /**
-   * Does nothing and always returns one empty array.
-   *
-   * @returns An empty array
-   */
-  protected getFonts() {
-    return []
   }
 
   /**
@@ -127,6 +119,13 @@ export class AcDbRegenerator extends AcDbDatabaseConverter<AcDbDatabase> {
   }
 
   /**
+   * Processes class definitions. Already resident on the database.
+   */
+  protected processClasses() {
+    // Do nothing
+  }
+
+  /**
    * Processes block table records.
    */
   protected processBlockTables() {
@@ -153,6 +152,33 @@ export class AcDbRegenerator extends AcDbDatabaseConverter<AcDbDatabase> {
         database: this._database,
         object: imageDef,
         key: imageDef.objectId
+      })
+    }
+
+    const mleaderStyles = this._database.objects.mleaderStyle.newIterator()
+    for (const mleaderStyle of mleaderStyles) {
+      this._database.events.dictObjetSet.dispatch({
+        database: this._database,
+        object: mleaderStyle,
+        key: mleaderStyle.objectId
+      })
+    }
+
+    const layerFilters = this._database.objects.layerFilter.newIterator()
+    for (const layerFilter of layerFilters) {
+      this._database.events.dictObjetSet.dispatch({
+        database: this._database,
+        object: layerFilter,
+        key: layerFilter.objectId
+      })
+    }
+
+    const layerIndexes = this._database.objects.layerIndex.newIterator()
+    for (const layerIndex of layerIndexes) {
+      this._database.events.dictObjetSet.dispatch({
+        database: this._database,
+        object: layerIndex,
+        key: layerIndex.objectId
       })
     }
   }

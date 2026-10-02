@@ -1,19 +1,33 @@
 import {
   AcGeCircArc3d,
+  acgeGetOcsReferenceVector,
+  acgeGetOcsReferenceVectorInto,
+  AcGeIntersectPrimitive,
   AcGeMatrix3d,
   AcGePoint3d,
   AcGePoint3dLike,
   AcGePointLike,
+  acgeTransformOcsPointToWcsInto,
+  acgeTransformWcsPointToOcs,
   AcGeVector3d,
   AcGeVector3dLike,
-  TAU
-} from '@mlightcad/geometry-engine'
+  TAU} from '@mlightcad/geometry-engine'
 import { AcGiRenderer } from '@mlightcad/graphic-interface'
 
-import { AcDbDxfFiler } from '../base'
-import { AcDbOsnapMode } from '../misc'
+import { AcDbDxfFiler } from '../base/AcDbDxfFiler'
+import { AcDbOsnapMode } from '../misc/AcDbOsnapMode'
 import { AcDbCurve } from './AcDbCurve'
 import { AcDbEntityProperties } from './AcDbEntityProperties'
+import { acdbForEachGripIndex } from './AcDbGripHelpers'
+import { acdbPickNearestOsnapPoint } from './AcDbOsnapHelpers'
+
+/** Reused across dxfIn to avoid per-entity temporaries (parse is sequential). */
+const _dxfInNormal = /*@__PURE__*/ new AcGeVector3d()
+const _dxfInRefVec = /*@__PURE__*/ new AcGeVector3d()
+const _dxfInPoint = /*@__PURE__*/ new AcGePoint3d()
+
+/** Quadrant grip angles in radians: 0°, 90°, 180°, 270°. */
+const CIRCLE_QUADRANT_GRIP_ANGLES = [0, Math.PI / 2, Math.PI, (Math.PI / 2) * 3]
 
 /**
  * Represents a circle entity in AutoCAD.
@@ -44,8 +58,32 @@ export class AcDbCircle extends AcDbCurve {
     return 'CIRCLE'
   }
 
-  /** The underlying geometric circular arc object */
-  private _geo: AcGeCircArc3d
+  /** Backing for the lazily materialized geometric circular arc object. */
+  private _geoData: AcGeCircArc3d | null = null
+  /** Thickness along the normal (DXF group 39) */
+  private _thickness = 0
+
+  /**
+   * The underlying geometric circular arc object. Materialized lazily so that
+   * factory-created entities (dxfIn path) never allocate default geometry.
+   */
+  private get _geo(): AcGeCircArc3d {
+    if (this._geoData == null) {
+      this._geoData = new AcGeCircArc3d(
+        new AcGePoint3d(),
+        1,
+        0,
+        TAU,
+        AcGeVector3d.Z_AXIS,
+        AcGeVector3d.X_AXIS
+      )
+    }
+    return this._geoData
+  }
+
+  private set _geo(value: AcGeCircArc3d) {
+    this._geoData = value
+  }
 
   /**
    * Creates a new circle entity.
@@ -74,20 +112,22 @@ export class AcDbCircle extends AcDbCurve {
    * );
    * ```
    */
+  constructor()
   constructor(
     center: AcGePointLike,
     radius: number,
+    normal?: AcGeVector3dLike
+  )
+  constructor(
+    center?: AcGePointLike,
+    radius?: number,
     normal: AcGeVector3dLike = AcGeVector3d.Z_AXIS
   ) {
     super()
-    this._geo = new AcGeCircArc3d(
-      center,
-      radius,
-      0,
-      TAU,
-      normal,
-      AcGeVector3d.X_AXIS
-    )
+    if (center !== undefined && radius !== undefined) {
+      const refVec = acgeGetOcsReferenceVector(normal)
+      this._geo = new AcGeCircArc3d(center, radius, 0, TAU, normal, refVec)
+    }
   }
 
   /**
@@ -166,6 +206,16 @@ export class AcDbCircle extends AcDbCurve {
   }
 
   /**
+   * Thickness along the entity normal (DXF group 39).
+   */
+  get thickness() {
+    return this._thickness
+  }
+  set thickness(value: number) {
+    this._thickness = value
+  }
+
+  /**
    * Gets the geometric extents (bounding box) of this circle.
    *
    * @returns The bounding box that encompasses the entire circle
@@ -180,6 +230,17 @@ export class AcDbCircle extends AcDbCurve {
     return this._geo.box
   }
 
+  /** @inheritdoc */
+  override subGetIntersectCurves(): AcGeIntersectPrimitive[] {
+    return [
+      {
+        kind: 'circArc',
+        arc: this._geo.clone(),
+        extendable: false
+      }
+    ]
+  }
+
   /**
    * Gets whether this circle is closed.
    *
@@ -189,6 +250,11 @@ export class AcDbCircle extends AcDbCurve {
    */
   get closed(): boolean {
     return this._geo.closed
+  }
+
+  /** @inheritdoc */
+  override get area(): number {
+    return this._geo.area
   }
 
   /**
@@ -229,6 +295,12 @@ export class AcDbCircle extends AcDbCurve {
       case AcDbOsnapMode.Tangent: {
         const points = this._geo.tangentPoints(pickPoint)
         snapPoints.push(...points)
+        break
+      }
+      case AcDbOsnapMode.Perpendicular: {
+        const candidates = this._geo.perpendicularPoints(pickPoint)
+        const nearest = acdbPickNearestOsnapPoint(pickPoint, candidates)
+        if (nearest) snapPoints.push(nearest)
         break
       }
       default:
@@ -352,7 +424,7 @@ export class AcDbCircle extends AcDbCurve {
               type: 'float',
               editable: false,
               accessor: {
-                get: () => this._geo.area
+                get: () => this.area
               }
             }
           ]
@@ -365,20 +437,32 @@ export class AcDbCircle extends AcDbCurve {
    * Gets the grip points for this circle.
    *
    * Grip points are control points that can be used to modify the circle.
-   * For a circle, the grip point is the center point.
+   * For a circle, the grip points are the center and the four quadrant
+   * points at 0°, 90°, 180°, and 270°.
    *
-   * @returns Array of grip points (center point)
+   * @returns Array of grip points (center, then quadrant points)
    *
    * @example
    * ```typescript
    * const gripPoints = circle.subGetGripPoints();
-   * // gripPoints contains: [center]
+   * // gripPoints contains: [center, q0, q90, q180, q270]
    * ```
    */
   subGetGripPoints() {
     const gripPoints = new Array<AcGePoint3d>()
     gripPoints.push(this.center)
+    for (const angle of CIRCLE_QUADRANT_GRIP_ANGLES) {
+      gripPoints.push(this._geo.getPointAtAngle(angle))
+    }
     return gripPoints
+  }
+
+  /** @inheritdoc */
+  subMoveGripPointsAt(indices: number[], offset: AcGeVector3dLike) {
+    acdbForEachGripIndex(indices, index => {
+      this.moveGripAt(index, offset)
+    })
+    return this
   }
 
   /**
@@ -403,6 +487,15 @@ export class AcDbCircle extends AcDbCurve {
   }
 
   /**
+   * This circle always draws as a single `lineStrip` primitive.
+   *
+   * @internal
+   */
+  override get directBatchPrimitive() {
+    return 'lineStrip' as const
+  }
+
+  /**
    * Draws this circle using the specified renderer.
    *
    * This method renders the circle as a circular arc using the circle's
@@ -423,10 +516,137 @@ export class AcDbCircle extends AcDbCurve {
    */
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
+    const centerOcs = acgeTransformWcsPointToOcs(this.center, this.normal)
     filer.writeSubclassMarker('AcDbCircle')
-    filer.writePoint3d(10, this.center)
+    filer.writePoint3d(10, centerOcs)
     filer.writeDouble(40, this.radius)
+    if (this.thickness !== 0) {
+      filer.writeDouble(39, this.thickness)
+    }
     filer.writeVector3d(210, this.normal)
     return this
   }
+
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    filer.atSubclassData('AcDbCircle')
+
+    let x = 0
+    let y = 0
+    let z = 0
+    let radius = this.radius
+    let nx = this.normal.x
+    let ny = this.normal.y
+    let nz = this.normal.z
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      const n = Number(item.value)
+      switch (code) {
+        case 10:
+          x = n
+          break
+        case 20:
+          y = n
+          break
+        case 30:
+          z = n
+          break
+        case 40:
+          radius = n
+          break
+        case 39:
+          this.thickness = n
+          break
+        case 210:
+          nx = n
+          break
+        case 220:
+          ny = n
+          break
+        case 230:
+          nz = n
+          break
+        default:
+          break
+      }
+    }
+
+    this.applyDxfInGeometry(x, y, z, radius, nx, ny, nz)
+    return this
+  }
+
+  private applyDxfInGeometry(
+    x: number,
+    y: number,
+    z: number,
+    radius: number,
+    nx: number,
+    ny: number,
+    nz: number
+  ) {
+    _dxfInNormal.set(nx, ny, nz)
+    if (_dxfInNormal.lengthSq() > 0) {
+      _dxfInNormal.normalize()
+    }
+    acgeGetOcsReferenceVectorInto(_dxfInRefVec, _dxfInNormal)
+    acgeTransformOcsPointToWcsInto(_dxfInPoint, { x, y, z }, _dxfInNormal)
+    // Build the final geometry in one pass; the entity's default geometry is
+    // never materialized (see the lazy _geo accessor).
+    this._geo = new AcGeCircArc3d(
+      _dxfInPoint,
+      radius,
+      0,
+      TAU,
+      _dxfInNormal,
+      _dxfInRefVec
+    )
+  }
+
+  override getOffsetCurves(offsetDist: number): AcDbCurve[] {
+    const curve = this.createOffsetCurve(offsetDist)
+    return curve ? [curve] : []
+  }
+
+  override getOffsetSideAtPoint(point: AcGePoint3dLike): 1 | -1 {
+    const c = this.center
+    const r = this.radius
+    return Math.sqrt((point.x - c.x) ** 2 + (point.y - c.y) ** 2) >= r ? 1 : -1
+  }
+
+  private createOffsetCurve(offsetDist: number): AcDbCircle | null {
+    const geo = this._geo.offset(offsetDist)
+    if (!geo) return null
+    return new AcDbCircle(geo.center, geo.radius, geo.normal)
+  }
+
+  private moveGripAt(gripIndex: number, offset: AcGeVector3dLike) {
+    switch (gripIndex) {
+      case 0:
+        this.transformBy(AcGeMatrix3d.makeTranslation(offset))
+        break
+      case 1:
+      case 2:
+      case 3:
+      case 4: {
+        const angle = CIRCLE_QUADRANT_GRIP_ANGLES[gripIndex - 1]
+        const point = this._geo.getPointAtAngle(angle)
+        const newPoint = new AcGePoint3d(
+          point.x + offset.x,
+          point.y + offset.y,
+          (point.z ?? 0) + (offset.z ?? 0)
+        )
+        const newRadius = newPoint.distanceTo(this.center)
+        if (newRadius > 0) {
+          this.radius = newRadius
+        }
+        break
+      }
+      default:
+        break
+    }
+  }
 }
+

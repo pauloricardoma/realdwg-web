@@ -8,6 +8,17 @@ export enum AcGiMTextFlowDirection {
   BY_STYLE = 5
 }
 
+/**
+ * Anchor position used to align rendered MText/Text relative to its
+ * insertion point.
+ *
+ * Values 1-9 mirror the DXF MText attachment point (group code 71).
+ * Values 10-12 are extensions used by AutoCAD TEXT/ATTRIB entities whose
+ * vertical alignment is the typographic baseline (DXF group 73 = 0). The
+ * baseline sits slightly above the bbox bottom by the descender height;
+ * for SHX fonts the descender is negligible, so renderers may treat
+ * `Baseline*` and `Bottom*` identically as a first approximation.
+ */
 export enum AcGiMTextAttachmentPoint {
   TopLeft = 1,
   TopCenter = 2,
@@ -17,7 +28,13 @@ export enum AcGiMTextAttachmentPoint {
   MiddleRight = 6,
   BottomLeft = 7,
   BottomCenter = 8,
-  BottomRight = 9
+  BottomRight = 9,
+  /** Baseline-left point (for DXF TEXT/ATTRIB with valign=BASELINE). */
+  BaselineLeft = 10,
+  /** Baseline-center point. */
+  BaselineCenter = 11,
+  /** Baseline-right point. */
+  BaselineRight = 12
 }
 
 export interface AcGiMTextData {
@@ -29,7 +46,19 @@ export interface AcGiMTextData {
   directionVector?: AcGeVector3dLike
   attachmentPoint?: AcGiMTextAttachmentPoint
   drawingDirection?: AcGiMTextFlowDirection
+  /**
+   * AutoCAD DXF group-44 line spacing factor.
+   * Ratio of actual baseline spacing to single spacing (`5/3` of text height).
+   * Default is `1.0`.
+   */
   lineSpaceFactor?: number
+  /**
+   * AutoCAD DXF group-73 line spacing style.
+   * `1` = At Least (default when omitted/`0`): spacing is at least the text
+   * height when the factor would pack lines tighter than that.
+   * `2` = Exact: use `lineSpaceFactor` even when lines overlap.
+   */
+  lineSpaceStyle?: number
   widthFactor?: number
 }
 

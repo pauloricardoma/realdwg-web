@@ -1,5 +1,7 @@
 import { AcGeBox2d, AcGeMatrix2d, AcGePoint2d, AcGePoint2dLike } from '../math'
 import { AcGeGeometryUtil, AcGeMathUtil } from '../util'
+import { acgeSignedPolygonArea2d } from '../util/AcGePolygonAreaUtil'
+import type { AcGeTessellateOptions } from './AcGeCurveTessellate'
 import { AcGeLoop2d } from './AcGeLoop2d'
 import { AcGePolyline2d } from './AcGePolyline2d'
 import { AcGeShape2d } from './AcGeShape2d'
@@ -67,10 +69,23 @@ export class AcGeArea2d extends AcGeShape2d {
   /**
    * @inheritdoc
    */
-  transform(_matrix: AcGeMatrix2d) {
-    // TODO: implement it
+  transform(matrix: AcGeMatrix2d) {
+    this._loops.forEach(loop => {
+      loop.transform(matrix)
+    })
     this._boundingBoxNeedsUpdate = true
     return this
+  }
+
+  /**
+   * Return a deep-cloned copy of this area.
+   */
+  clone() {
+    const area = new AcGeArea2d()
+    this._loops.forEach(loop => {
+      area.add(loop.clone())
+    })
+    return area
   }
 
   /**
@@ -88,8 +103,17 @@ export class AcGeArea2d extends AcGeShape2d {
     return pointBoundaries
   }
 
-  buildHierarchy() {
-    const pointBoundaries = this.getPoints(100)
+  /**
+   * Sample every loop for display using per-edge chord-height tessellation.
+   *
+   * @param options - Chord-height tessellation options forwarded to each loop
+   */
+  tessellate(options?: AcGeTessellateOptions): AcGePoint2d[][] {
+    return this.loops.map(loop => loop.tessellate(options))
+  }
+
+  buildHierarchy(options?: AcGeTessellateOptions) {
+    const pointBoundaries = this.tessellate(options)
     const boundaryBoxes = this.calculateBoundaryBoxes(pointBoundaries)
     const areaSortIndex: number[] = this.sortBoundaryBoxesByAreas(boundaryBoxes)
 
@@ -148,7 +172,7 @@ export class AcGeArea2d extends AcGeShape2d {
       // Sets the number of points used for curve segmentation to 128
       const points = loop.getPoints(128) as AcGePoint2d[]
 
-      const loopArea = this.polygonArea(points)
+      const loopArea = acgeSignedPolygonArea2d(points)
 
       if (i === 0) {
         // outter loop
@@ -160,23 +184,6 @@ export class AcGeArea2d extends AcGeShape2d {
     }
 
     return totalArea
-  }
-
-  /**
-   * Calculate signed area of a polygon using Shoelace formula
-   */
-  private polygonArea(points: AcGePoint2d[]): number {
-    const count = points.length
-    if (count < 3) return 0
-
-    let area = 0
-    for (let i = 0, j = count - 1; i < count; j = i++) {
-      const p1 = points[j]
-      const p2 = points[i]
-      area += p1.x * p2.y - p2.x * p1.y
-    }
-
-    return area * 0.5
   }
 
   /**

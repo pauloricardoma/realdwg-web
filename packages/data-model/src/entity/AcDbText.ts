@@ -1,7 +1,11 @@
 import {
   AcGeBox3d,
+  AcGeMathUtil,
+  AcGeMatrix3d,
   AcGePoint3d,
-  AcGePoint3dLike
+  AcGePoint3dLike,
+  AcGeVector3d,
+  AcGeVector3dLike
 } from '@mlightcad/geometry-engine'
 import {
   AcGiEntity,
@@ -12,10 +16,15 @@ import {
   AcGiTextStyle
 } from '@mlightcad/graphic-interface'
 
-import { AcDbDxfFiler } from '../base'
-import { AcDbOsnapMode, DEFAULT_TEXT_STYLE } from '../misc'
+import { AcDbDxfFiler } from '../base/AcDbDxfFiler'
+import { AcDbOsnapMode } from '../misc/AcDbOsnapMode'
 import { AcDbEntity } from './AcDbEntity'
 import { AcDbEntityProperties } from './AcDbEntityProperties'
+import { acdbMovePrimaryGripPointAt } from './AcDbGripHelpers'
+import {
+  acdbEstimatePlainTextWidth,
+  acdbExpandBoxByOrientedTextRect
+} from './AcDbTextExtentsHelpers'
 
 /**
  * Defines the horizontal alignment mode for text entities.
@@ -86,8 +95,26 @@ export class AcDbText extends AcDbEntity {
   private _thickness: number
   /** The height of the text */
   private _height: number
-  /** The insertion point of the text */
+  /** The insertion point of the text (DXF group 10). */
   private _position: AcGePoint3d
+  /**
+   * The alignment point of the text (DXF group 11).
+   *
+   * Used when {@link horizontalMode} is not LEFT or {@link verticalMode} is
+   * not BASELINE. Mirrors `AcDbText::alignmentPoint` in ObjectARX.
+   */
+  private _alignmentPoint: AcGePoint3d
+  /**
+   * Whether the alignment point was explicitly provided by the source file
+   * (DXF group 11 / DWG) or set through the API.
+   *
+   * Parse paths mirror {@link _position} into {@link _alignmentPoint} when
+   * group 11 is absent, so coordinate equality cannot tell "unset" apart
+   * from a spec-compliant file whose group 11 happens to equal group 10
+   * (e.g. everything written by ezdxf's `Text.set_placement`). This flag is
+   * the source of truth used by {@link resolveTextAnchor}.
+   */
+  private _hasAlignmentPoint = false
   /** The rotation angle of the text */
   private _rotation: number
   /** The oblique angle of the text */
@@ -100,6 +127,13 @@ export class AcDbText extends AcDbEntity {
   private _styleName: string
   /** The width factor (scale) of the text */
   private _widthFactor: number
+  /**
+   * Text generation flags (DXF group 71).
+   * Bit 2 = backward (mirrored in X); bit 4 = upside down (mirrored in Y).
+   */
+  private _generationFlag = 0
+  /** Extrusion / plane normal (DXF group 210). */
+  private _normal = new AcGeVector3d(0, 0, 1)
 
   /**
    * Creates a new text entity.
@@ -121,6 +155,7 @@ export class AcDbText extends AcDbEntity {
     this._height = 0
     this._thickness = 1
     this._position = new AcGePoint3d()
+    this._alignmentPoint = new AcGePoint3d()
     this._rotation = 0
     this._oblique = 0
     this._horizontalMode = AcDbTextHorizontalMode.LEFT
@@ -249,6 +284,55 @@ export class AcDbText extends AcDbEntity {
    */
   set position(value: AcGePoint3d) {
     this._position.copy(value)
+  }
+
+  /**
+   * Gets the alignment point of the text in WCS coordinates.
+   *
+   * The alignment point is the placement anchor used when
+   * {@link horizontalMode} is not {@link AcDbTextHorizontalMode.LEFT} or
+   * {@link verticalMode} is not {@link AcDbTextVerticalMode.BASELINE}. For
+   * a Middle/Center text, for example, this is the centroid of the text's
+   * bounding box. Mirrors `AcDbText::alignmentPoint` in ObjectARX and maps
+   * to DXF group code 11.
+   *
+   * When the horizontal/vertical modes are at their defaults, the alignment
+   * point is unused and typically equals {@link position}.
+   *
+   * @returns The alignment point as a 3D point
+   */
+  get alignmentPoint() {
+    return this._alignmentPoint
+  }
+
+  /**
+   * Sets the alignment point of the text in WCS coordinates.
+   *
+   * Setting an alignment point through the API marks it as explicitly
+   * provided (see {@link hasAlignmentPoint}).
+   *
+   * @param value - The new alignment point
+   */
+  set alignmentPoint(value: AcGePoint3d) {
+    this._alignmentPoint.copy(value)
+    this._hasAlignmentPoint = true
+  }
+
+  /**
+   * Whether the alignment point was explicitly provided by the source file
+   * or through the API, as opposed to mirrored from {@link position} by a
+   * parse-time fallback when group 11 is absent.
+   */
+  get hasAlignmentPoint() {
+    return this._hasAlignmentPoint
+  }
+
+  /**
+   * Marks whether the alignment point is explicitly provided. Parse paths
+   * (DXF/DWG converters) set this after assigning {@link alignmentPoint}.
+   */
+  set hasAlignmentPoint(value: boolean) {
+    this._hasAlignmentPoint = value
   }
 
   /**
@@ -438,6 +522,45 @@ export class AcDbText extends AcDbEntity {
   }
 
   /**
+   * Text generation flags (DXF group 71).
+   * Bit 2 = backward; bit 4 = upside down.
+   */
+  get generationFlag() {
+    return this._generationFlag
+  }
+  set generationFlag(value: number) {
+    this._generationFlag = value
+  }
+
+  /** True when the text is mirrored in X (generation flag bit 2). */
+  get isBackward() {
+    return (this._generationFlag & 2) !== 0
+  }
+  set isBackward(value: boolean) {
+    this._generationFlag = value
+      ? this._generationFlag | 2
+      : this._generationFlag & ~2
+  }
+
+  /** True when the text is mirrored in Y (generation flag bit 4). */
+  get isUpsideDown() {
+    return (this._generationFlag & 4) !== 0
+  }
+  set isUpsideDown(value: boolean) {
+    this._generationFlag = value
+      ? this._generationFlag | 4
+      : this._generationFlag & ~4
+  }
+
+  /** Extrusion / plane normal (DXF group 210). */
+  get normal(): AcGeVector3d {
+    return this._normal
+  }
+  set normal(value: AcGeVector3dLike) {
+    this._normal.copy(value)
+  }
+
+  /**
    * Gets the geometric extents (bounding box) of this text.
    *
    * @returns The bounding box that encompasses the text
@@ -449,8 +572,40 @@ export class AcDbText extends AcDbEntity {
    * ```
    */
   get geometricExtents(): AcGeBox3d {
-    // TODO: Implement it correctly
-    return new AcGeBox3d()
+    const box = new AcGeBox3d()
+    const { anchor, attachmentPoint } = this.resolveTextAnchor()
+
+    const width = acdbEstimatePlainTextWidth(
+      this.textString,
+      this.height,
+      this.widthFactor
+    )
+    return acdbExpandBoxByOrientedTextRect(
+      box,
+      anchor,
+      width,
+      this.height,
+      attachmentPoint,
+      this.rotation
+    )
+  }
+
+  /**
+   * Gets the grip points for this text entity.
+   *
+   * @returns Array containing the text insertion point.
+   */
+  subGetGripPoints() {
+    return [this._position]
+  }
+
+  /** @inheritdoc */
+  subMoveGripPointsAt(indices: number[], offset: AcGeVector3dLike) {
+    acdbMovePrimaryGripPointAt(indices, offset, this._position)
+    // Non-default alignments render from group 11 (`alignmentPoint`), so a grip
+    // drag on group 10 must translate both anchors together.
+    this._alignmentPoint.add(offset)
+    return this
   }
 
   /**
@@ -474,6 +629,54 @@ export class AcDbText extends AcDbEntity {
     if (AcDbOsnapMode.Insertion === osnapMode) {
       snapPoints.push(this._position)
     }
+  }
+
+  /**
+   * Transforms this text by the specified matrix.
+   */
+  transformBy(matrix: AcGeMatrix3d) {
+    const origin = this._position.clone()
+    const xAxisPoint = this._position
+      .clone()
+      .add(
+        new AcGeVector3d(Math.cos(this._rotation), Math.sin(this._rotation), 0)
+      )
+    const yAxisPoint = this._position
+      .clone()
+      .add(
+        new AcGeVector3d(-Math.sin(this._rotation), Math.cos(this._rotation), 0)
+      )
+    const zAxisPoint = this._position.clone().add(new AcGeVector3d(0, 0, 1))
+
+    origin.applyMatrix4(matrix)
+    xAxisPoint.applyMatrix4(matrix)
+    yAxisPoint.applyMatrix4(matrix)
+    zAxisPoint.applyMatrix4(matrix)
+
+    const xAxis = new AcGeVector3d(xAxisPoint).sub(origin)
+    const yAxis = new AcGeVector3d(yAxisPoint).sub(origin)
+    const zAxis = new AcGeVector3d(zAxisPoint).sub(origin)
+    const yScale = yAxis.length()
+    const xScale = xAxis.length()
+    const zScale = zAxis.length()
+
+    this._position.copy(origin)
+    if (xScale > 0) {
+      this._rotation = Math.atan2(xAxis.y, xAxis.x)
+    }
+    if (yScale > 0) {
+      this._height *= yScale
+      if (xScale > 0) {
+        this._widthFactor *= xScale / yScale
+      }
+    }
+    if (zScale > 0) {
+      this._thickness *= zScale
+    }
+    const alignmentPoint = this._alignmentPoint.clone()
+    alignmentPoint.applyMatrix4(matrix)
+    this._alignmentPoint.copy(alignmentPoint)
+    return this
   }
 
   /**
@@ -618,11 +821,9 @@ export class AcDbText extends AcDbEntity {
    * ```
    */
   protected getTextStyle(): AcGiTextStyle {
-    const textStyleTable = this.database.tables.textStyleTable
-    let style = textStyleTable.getAt(this.styleName)
+    const style = this.database.tables.textStyleTable.resolveAt(this.styleName)
     if (!style) {
-      style = (textStyleTable.getAt(DEFAULT_TEXT_STYLE) ||
-        textStyleTable.getAt(DEFAULT_TEXT_STYLE))!
+      throw new Error('No valid text style found in text style table.')
     }
     return style.textStyle
   }
@@ -643,20 +844,133 @@ export class AcDbText extends AcDbEntity {
     renderer: AcGiRenderer,
     delay?: boolean
   ): AcGiEntity | undefined {
+    // For non-default alignments the DXF stores the placement anchor in
+    // group 11 (`alignmentPoint`) — `position` (group 10) is only the
+    // left-baseline insertion point and is misleading for CENTER/RIGHT
+    // or MIDDLE/TOP/BOTTOM modes. Pick the right reference + the matching
+    // attachment point so the renderer can compute the offset itself
+    // from the real bbox of the laid-out glyphs.
+    const { anchor: position, attachmentPoint } = this.resolveTextAnchor()
     const mtextData: AcGiMTextData = {
       text: this.textString,
       height: this.height,
       width: Infinity,
       widthFactor: this.widthFactor,
-      position: this.position,
+      position,
       // Please use 'rotation' and do not set value of 'directionVector' because it will overrides
       // rotation value.
       rotation: this.rotation,
       // MText draw text from top to bottom.
       drawingDirection: AcGiMTextFlowDirection.BOTTOM_TO_TOP,
-      attachmentPoint: AcGiMTextAttachmentPoint.BottomLeft
+      attachmentPoint
     }
     return renderer.mtext(mtextData, this.getTextStyle(), delay)
+  }
+
+  /**
+   * Resolves the anchor point and attachment used for rendering and extents.
+   *
+   * For default LEFT + BASELINE, `position` (group 10) is the anchor.
+   * For other alignments, `alignmentPoint` (group 11) is used when set.
+   * When group 11 is missing, falls back to LEFT/BASELINE at `position`.
+   */
+  private resolveTextAnchor(): {
+    anchor: AcGePoint3d
+    attachmentPoint: AcGiMTextAttachmentPoint
+  } {
+    const attachmentPoint = this.resolveAttachmentPoint()
+
+    if (attachmentPoint === AcGiMTextAttachmentPoint.BaselineLeft) {
+      return { anchor: this._position, attachmentPoint }
+    }
+
+    const ap = this._alignmentPoint
+    // "Unset" is decided by the explicit-presence flag, not by coordinate
+    // equality: spec-compliant writers (ezdxf `set_placement`, AutoCAD) emit
+    // group 11 equal to group 10 when the insertion point coincides with the
+    // alignment point. The all-zero check stays as a guard for files that
+    // carry a degenerate zero group 11.
+    const apIsUnset =
+      !this._hasAlignmentPoint ||
+      (ap.x === 0 && ap.y === 0 && ap.z === 0)
+    if (apIsUnset) {
+      return {
+        anchor: this._position,
+        attachmentPoint: AcGiMTextAttachmentPoint.BaselineLeft
+      }
+    }
+
+    return { anchor: ap, attachmentPoint }
+  }
+
+  /**
+   * Maps the (horizontal, vertical) DXF alignment modes of this TEXT/ATTRIB
+   * to the matching {@link AcGiMTextAttachmentPoint}.
+   *
+   * The DXF spec uses two orthogonal axes (group 72 + group 73), with the
+   * special-case `halign=MIDDLE (4)` collapsing both to a single centroid
+   * placement. The renderer accepts the standard 3×3 + Baseline matrix
+   * (TopLeft … BaselineRight). This function translates between the two.
+   *
+   * For default LEFT + BASELINE we return `BaselineLeft` and the caller
+   * uses `position` (group 10) as the anchor. For every other case we
+   * return the matching attachment and the caller passes
+   * `alignmentPoint` (group 11) — the DXF placement anchor — to the
+   * renderer.
+   */
+  private resolveAttachmentPoint(): AcGiMTextAttachmentPoint {
+    const h = this._horizontalMode
+    const v = this._verticalModel
+
+    // halign=MIDDLE (4) is a special "centroid" mode that overrides
+    // valign — the placement anchor is the bbox center regardless of
+    // what valign claims.
+    if (h === AcDbTextHorizontalMode.MIDDLE) {
+      return AcGiMTextAttachmentPoint.MiddleCenter
+    }
+
+    // halign=ALIGNED (3) and halign=FIT (5) are two-point text — the
+    // libredwg/dxf converter has already pre-computed `position` so it
+    // sits at the left baseline of a string whose `widthFactor` was
+    // scaled to fit between the two points. The renderer's default
+    // BaselineLeft anchor is the right choice.
+    if (
+      h === AcDbTextHorizontalMode.ALIGNED ||
+      h === AcDbTextHorizontalMode.FIT
+    ) {
+      return AcGiMTextAttachmentPoint.BaselineLeft
+    }
+
+    // Standard 3×3 mapping. Note BASELINE (0) maps to Baseline*, BOTTOM
+    // (1) maps to Bottom* — different semantics in the DXF spec, even if
+    // the visual difference is just the descender height.
+    switch (v) {
+      case AcDbTextVerticalMode.TOP:
+        if (h === AcDbTextHorizontalMode.CENTER)
+          return AcGiMTextAttachmentPoint.TopCenter
+        if (h === AcDbTextHorizontalMode.RIGHT)
+          return AcGiMTextAttachmentPoint.TopRight
+        return AcGiMTextAttachmentPoint.TopLeft
+      case AcDbTextVerticalMode.MIDDLE:
+        if (h === AcDbTextHorizontalMode.CENTER)
+          return AcGiMTextAttachmentPoint.MiddleCenter
+        if (h === AcDbTextHorizontalMode.RIGHT)
+          return AcGiMTextAttachmentPoint.MiddleRight
+        return AcGiMTextAttachmentPoint.MiddleLeft
+      case AcDbTextVerticalMode.BOTTOM:
+        if (h === AcDbTextHorizontalMode.CENTER)
+          return AcGiMTextAttachmentPoint.BottomCenter
+        if (h === AcDbTextHorizontalMode.RIGHT)
+          return AcGiMTextAttachmentPoint.BottomRight
+        return AcGiMTextAttachmentPoint.BottomLeft
+      case AcDbTextVerticalMode.BASELINE:
+      default:
+        if (h === AcDbTextHorizontalMode.CENTER)
+          return AcGiMTextAttachmentPoint.BaselineCenter
+        if (h === AcDbTextHorizontalMode.RIGHT)
+          return AcGiMTextAttachmentPoint.BaselineRight
+        return AcGiMTextAttachmentPoint.BaselineLeft
+    }
   }
 
   /**
@@ -676,9 +990,149 @@ export class AcDbText extends AcDbEntity {
     filer.writeDouble(41, this.widthFactor)
     filer.writeAngle(51, this.oblique)
     filer.writeString(7, this.styleName)
+    if (this.generationFlag !== 0) {
+      filer.writeInt16(71, this.generationFlag)
+    }
     filer.writeInt16(72, this.horizontalMode)
     filer.writeInt16(73, this.verticalMode)
-    filer.writePoint3d(11, this.position)
+    // Group 11 holds the alignment point used when horizontal/vertical modes
+    // are non-default. For LEFT + BASELINE, AutoCAD writes the position again
+    // (or zero), so we mirror by emitting `alignmentPoint`, which defaults to
+    // a copy of `position` for entities created in code.
+    filer.writePoint3d(11, this.alignmentPoint)
+    filer.writeVector3d(210, this.normal)
     return this
+  }
+
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    filer.atSubclassData('AcDbText')
+
+    let px = this.position.x
+    let py = this.position.y
+    let pz = this.position.z
+    let ax = this.alignmentPoint.x
+    let ay = this.alignmentPoint.y
+    let az = this.alignmentPoint.z
+    let hasAlignment = false
+    let nx = this.normal.x
+    let ny = this.normal.y
+    let nz = this.normal.z
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      const n = Number(item.value)
+      switch (code) {
+        case 10:
+          px = n
+          break
+        case 20:
+          py = n
+          break
+        case 30:
+          pz = n
+          break
+        case 11:
+          ax = n
+          hasAlignment = true
+          break
+        case 21:
+          ay = n
+          hasAlignment = true
+          break
+        case 31:
+          az = n
+          hasAlignment = true
+          break
+        case 1:
+          this.textString = String(item.value)
+          break
+        case 7:
+          this.styleName = String(item.value)
+          break
+        case 39:
+          this.thickness = n
+          break
+        case 40:
+          this.height = n
+          break
+        case 41:
+          this.widthFactor = n
+          break
+        case 50:
+          this.rotation = AcGeMathUtil.degToRad(n)
+          break
+        case 51:
+          this.oblique = AcGeMathUtil.degToRad(n)
+          break
+        case 71:
+          this.generationFlag = n
+          break
+        case 72:
+          this.horizontalMode = n
+          break
+        case 73:
+          this.verticalMode = n
+          break
+        case 210:
+          nx = n
+          break
+        case 220:
+          ny = n
+          break
+        case 230:
+          nz = n
+          break
+        case 100: {
+          // TEXT uses a duplicated AcDbText marker before group 73. ATTRIB /
+          // ATTDEF follow with a different subclass — hand those off.
+          const marker = String(item.value)
+          if (marker === 'AcDbText') {
+            break
+          }
+          filer.pushBackItem(item)
+          this.finishTextDxfIn(px, py, pz, ax, ay, az, hasAlignment, nx, ny, nz)
+          return this
+        }
+        default:
+          // Unknown optional TEXT codes — keep scanning within this object.
+          break
+      }
+    }
+
+    this.finishTextDxfIn(px, py, pz, ax, ay, az, hasAlignment, nx, ny, nz)
+    return this
+  }
+
+  private finishTextDxfIn(
+    px: number,
+    py: number,
+    pz: number,
+    ax: number,
+    ay: number,
+    az: number,
+    hasAlignment: boolean,
+    nx: number,
+    ny: number,
+    nz: number
+  ) {
+    this.position = new AcGePoint3d(px, py, pz)
+    // The assignment goes through the setter (which marks the alignment
+    // point as provided), so set the flag explicitly afterwards: only a
+    // present and non-zero group 11 counts as provided; the fallback branch
+    // merely mirrors `position` into `alignmentPoint`.
+    if (hasAlignment && !(ax === 0 && ay === 0 && az === 0)) {
+      this.alignmentPoint = new AcGePoint3d(ax, ay, az)
+      this._hasAlignmentPoint = true
+    } else {
+      this.alignmentPoint = new AcGePoint3d(px, py, pz)
+      this._hasAlignmentPoint = false
+    }
+    const normal = new AcGeVector3d(nx, ny, nz)
+    if (normal.lengthSq() > 0) {
+      this.normal.copy(normal.normalize())
+    }
   }
 }

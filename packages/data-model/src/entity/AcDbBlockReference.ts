@@ -1,5 +1,7 @@
 import {
   AcGeBox3d,
+  AcGeIntersectPrimitive,
+  AcGeMathUtil,
   AcGeMatrix3d,
   AcGePoint3d,
   AcGePoint3dLike,
@@ -9,14 +11,21 @@ import {
 } from '@mlightcad/geometry-engine'
 import { AcGiEntity, AcGiRenderer } from '@mlightcad/graphic-interface'
 
-import { AcDbDxfFiler, AcDbObjectId } from '../base'
-import { AcDbObjectIterator, AcDbOsnapMode, AcDbRenderingCache } from '../misc'
+import { AcDbDxfFiler } from '../base/AcDbDxfFiler'
+import { AcDbObjectId } from '../base/AcDbObject'
+import { AcDbObjectIterator } from '../misc/AcDbObjectIterator'
+import { AcDbOsnapMode } from '../misc/AcDbOsnapMode'
+import { AcDbRenderingCache } from '../misc/AcDbRenderingCache'
+import { AcDbDynBlockReference } from '../object/AcDbDynBlockReference'
 import { AcDbAttribute } from './AcDbAttribute'
 import { AcDbEntity } from './AcDbEntity'
 import {
   AcDbEntityProperties,
   AcDbEntityPropertyGroup
 } from './AcDbEntityProperties'
+import { acdbMovePrimaryGripPointAt } from './AcDbGripHelpers'
+import { acdbTransformIntersectPrimitives } from './AcDbIntersectHelpers'
+import { acdbPickNearestOsnapPoint } from './AcDbOsnapHelpers'
 
 /**
  * Represents a block reference entity in AutoCAD.
@@ -60,6 +69,14 @@ export class AcDbBlockReference extends AcDbEntity {
   private _blockName: string
   /** Attributes associated with this block reference */
   private _attribs: Map<string, AcDbAttribute>
+  /** MINSERT column count (DXF group 70); default 1 */
+  private _columnCount = 1
+  /** MINSERT row count (DXF group 71); default 1 */
+  private _rowCount = 1
+  /** MINSERT column spacing (DXF group 44) */
+  private _columnSpacing = 0
+  /** MINSERT row spacing (DXF group 45) */
+  private _rowSpacing = 0
 
   /**
    * Creates a new block reference entity.
@@ -78,7 +95,7 @@ export class AcDbBlockReference extends AcDbEntity {
    */
   constructor(blockName: string) {
     super()
-    this._blockName = blockName
+    this._blockName = blockName ?? ''
     this._position = new AcGePoint3d()
     this._rotation = 0.0
     this._normal = new AcGeVector3d(0, 0, 1)
@@ -207,8 +224,56 @@ export class AcDbBlockReference extends AcDbEntity {
     this._normal.copy(value).normalize()
   }
 
+  /**
+   * Gets the name of the block definition referenced by this INSERT entity.
+   *
+   * The returned value is the block table record key used to resolve
+   * {@link blockTableRecord} from the current database.
+   *
+   * @returns The referenced block name.
+   */
   get blockName() {
     return this._blockName
+  }
+
+  /**
+   * Sets the name of the block table record referenced by this insert.
+   * Used when filing in from DXF (group code 2).
+   */
+  set blockName(value: string) {
+    this._blockName = value
+  }
+
+  /** MINSERT column count (DXF group 70). */
+  get columnCount() {
+    return this._columnCount
+  }
+  set columnCount(value: number) {
+    this._columnCount = Math.max(1, Math.floor(value) || 1)
+  }
+
+  /** MINSERT row count (DXF group 71). */
+  get rowCount() {
+    return this._rowCount
+  }
+  set rowCount(value: number) {
+    this._rowCount = Math.max(1, Math.floor(value) || 1)
+  }
+
+  /** MINSERT column spacing (DXF group 44). */
+  get columnSpacing() {
+    return this._columnSpacing
+  }
+  set columnSpacing(value: number) {
+    this._columnSpacing = value
+  }
+
+  /** MINSERT row spacing (DXF group 45). */
+  get rowSpacing() {
+    return this._rowSpacing
+  }
+  set rowSpacing(value: number) {
+    this._rowSpacing = value
   }
 
   /**
@@ -227,7 +292,22 @@ export class AcDbBlockReference extends AcDbEntity {
    * ```
    */
   get blockTableRecord() {
+    // Missing block names must not throw when looking up the BTR.
+    if (!this._blockName) {
+      return undefined
+    }
     return this.database.tables.blockTable.getAt(this._blockName)
+  }
+
+  /**
+   * Block table record used for drawing, extents, osnap, and intersection.
+   *
+   * For dynamic block references that use an anonymous `*U` representation,
+   * this returns that anonymous record (via {@link AcDbDynBlockReference});
+   * otherwise it returns {@link blockTableRecord}.
+   */
+  get drawableBlockTableRecord() {
+    return AcDbDynBlockReference.drawableBlockTableRecord(this)
   }
 
   /**
@@ -239,6 +319,34 @@ export class AcDbBlockReference extends AcDbEntity {
   appendAttributes(attrib: AcDbAttribute) {
     this._attribs.set(attrib.objectId, attrib)
     attrib.ownerId = this.objectId
+    this.syncAttributeDatabases()
+  }
+
+  /**
+   * Propagates this INSERT's database association to all attached attributes.
+   *
+   * Also refreshes each attribute's {@link AcDbObject.ownerId} and commits a
+   * real database handle. Attributes may have been appended while this INSERT
+   * still had a TEMP_ id; once the INSERT is committed those stale owner ids
+   * (and TEMP_ attribute handles) must be replaced so DXF round-trips and
+   * owner lookups keep working.
+   *
+   * @internal
+   */
+  syncAttributeDatabases() {
+    try {
+      const db = this.database
+      const next = new Map<string, AcDbAttribute>()
+      this._attribs.forEach(attrib => {
+        attrib.database = db
+        attrib.ownerId = this.objectId
+        db.commitObjectHandle(attrib)
+        next.set(attrib.objectId, attrib)
+      })
+      this._attribs = next
+    } catch {
+      // INSERT not yet associated with a database.
+    }
   }
 
   /**
@@ -282,11 +390,16 @@ export class AcDbBlockReference extends AcDbEntity {
    *
    * ```
    * blockTransform =
-   *   T(position)
+   *   T(position.x, position.y, 0)
    * · R(rotation about OCS Z)
    * · S(scaleFactors)
    * · T(-blockBasePoint)
    * ```
+   *
+   * Insertion Z is flattened to 0 so elevated nested INSERTs stay inside the
+   * 2D orthographic near/far band (same plan-view policy as
+   * {@link AcDbLine.subWorldDraw}). {@link position}.z is still stored on the
+   * entity.
    *
    * ### Notes
    *
@@ -302,7 +415,7 @@ export class AcDbBlockReference extends AcDbEntity {
     // Retrieve the referenced block table record.
     // The block definition contains its own local coordinate system
     // whose origin is the block base point.
-    const blockTableRecord = this.blockTableRecord
+    const blockTableRecord = this.drawableBlockTableRecord
 
     // The base point (origin) of the block definition.
     // All entities inside the block are defined relative to this point.
@@ -356,18 +469,25 @@ export class AcDbBlockReference extends AcDbEntity {
     //
     // This moves the transformed block geometry from the origin
     // to its final insertion point, still in OCS.
+    //
+    // Plan-view note: translation Z is forced to 0. Orthographic 2D
+    // cameras use a narrow near/far band around Z≈0 (see
+    // AcDbLine.subWorldDraw). Nested INSERTs often carry large
+    // elevations (e.g. title-block signature stamps at |Z|≈9000);
+    // preserving that Z depth-clips their geometry even though XY is
+    // on-screen. The stored position.z is unchanged for properties / DXF.
     // ------------------------------------------------------------
     const mInsert = new AcGeMatrix3d().makeTranslation(
       this._position.x,
       this._position.y,
-      this._position.z
+      0
     )
 
     // ------------------------------------------------------------
     // Final composition (right-multiply convention)
     //
     // blockTransform =
-    //   T(position)
+    //   T(position.x, position.y, 0)
     // · R(rotation about OCS Z)
     // · S(scaleFactors)
     // · T(-blockBasePoint)
@@ -385,7 +505,22 @@ export class AcDbBlockReference extends AcDbEntity {
   }
 
   /**
-   * Gets the object snap points for this mtext.
+   * Gets the grip points for this block reference.
+   *
+   * @returns Array containing the block insertion point.
+   */
+  subGetGripPoints() {
+    return [this._position]
+  }
+
+  /** @inheritdoc */
+  subMoveGripPointsAt(indices: number[], offset: AcGeVector3dLike) {
+    acdbMovePrimaryGripPointAt(indices, offset, this._position)
+    return this
+  }
+
+  /**
+   * Gets the object snap points for this block reference.
    *
    * Object snap points are precise points that can be used for positioning
    * when drawing or editing. This method provides snap points based on the
@@ -400,25 +535,105 @@ export class AcDbBlockReference extends AcDbEntity {
    * to set GS marker of the subentity involved in the object snap operation. For
    * now, we don't provide such a GS marker mechanism yet. So passed id of subentity
    * as GS marker. Maybe this behavior will change in the future.
+   * @param insertionMat - Cumulative insertion transform matrix from parent
+   * block references.
    */
   subGetOsnapPoints(
     osnapMode: AcDbOsnapMode,
     pickPoint: AcGePoint3dLike,
     lastPoint: AcGePoint3dLike,
     snapPoints: AcGePoint3dLike[],
-    gsMark?: AcDbObjectId
+    gsMark?: AcDbObjectId,
+    insertionMat?: AcGeMatrix3d
   ) {
+    const parentInsertionMat = insertionMat ?? new AcGeMatrix3d()
+
     if (AcDbOsnapMode.Insertion === osnapMode) {
-      snapPoints.push(this._position)
+      snapPoints.push(this.getInsertionPoint(parentInsertionMat))
     } else if (gsMark) {
       this.subEntityGetOsnapPoints(
         osnapMode,
         pickPoint,
         lastPoint,
         snapPoints,
-        gsMark
+        gsMark,
+        parentInsertionMat
+      )
+    } else {
+      this.collectBlockOsnapPoints(
+        osnapMode,
+        pickPoint,
+        lastPoint,
+        snapPoints,
+        parentInsertionMat
       )
     }
+  }
+
+  /**
+   * Transforms this block reference by an arbitrary world-space matrix.
+   *
+   * Unlike simple entities that can transform raw geometry directly, an INSERT
+   * stores placement as decomposed parameters (`position`, `rotation`,
+   * `scaleFactors`, and `normal`). This method applies the input matrix to a
+   * derived local frame, then reconstructs those parameters from the transformed
+   * frame so the reference remains representable as an INSERT.
+   *
+   * Recomposition pipeline:
+   *
+   * 1. Build local axes from current `rotation`, `normal`, and `scaleFactors`
+   * 2. Transform axis endpoints and origin by `matrix`
+   * 3. Recompute normal from transformed X/Y axes (with a degenerate fallback)
+   * 4. Project transformed X axis into the new OCS to recover `rotation`
+   * 5. Recover axis lengths as new `scaleFactors`
+   * 6. Transform all attached attributes with the same matrix
+   *
+   * @param matrix - Transformation matrix in WCS.
+   * @returns The current block reference instance.
+   */
+  transformBy(matrix: AcGeMatrix3d) {
+    const extrusion = new AcGeMatrix3d().setFromExtrusionDirection(this._normal)
+    const rotation = new AcGeMatrix3d().makeRotationZ(this._rotation)
+    const localToWcs = new AcGeMatrix3d().multiplyMatrices(extrusion, rotation)
+
+    const origin = this._position.clone()
+    const xAxisPoint = new AcGePoint3d(this._scaleFactors.x, 0, 0)
+      .applyMatrix4(localToWcs)
+      .add(origin)
+    const yAxisPoint = new AcGePoint3d(0, this._scaleFactors.y, 0)
+      .applyMatrix4(localToWcs)
+      .add(origin)
+    const zAxisPoint = new AcGePoint3d(0, 0, this._scaleFactors.z)
+      .applyMatrix4(localToWcs)
+      .add(origin)
+
+    origin.applyMatrix4(matrix)
+    xAxisPoint.applyMatrix4(matrix)
+    yAxisPoint.applyMatrix4(matrix)
+    zAxisPoint.applyMatrix4(matrix)
+
+    const xAxis = new AcGeVector3d(xAxisPoint).sub(origin)
+    const yAxis = new AcGeVector3d(yAxisPoint).sub(origin)
+    const zAxis = new AcGeVector3d(zAxisPoint).sub(origin)
+
+    let normal = new AcGeVector3d().crossVectors(xAxis, yAxis)
+    if (normal.lengthSq() === 0) {
+      normal = this._normal.clone().transformDirection(matrix)
+    } else {
+      normal.normalize()
+    }
+
+    const extrusionMatrix = new AcGeMatrix3d().setFromExtrusionDirection(normal)
+    const ocsInverse = extrusionMatrix.clone().invert()
+    const localXAxis = xAxis.clone().applyMatrix4(ocsInverse)
+
+    this._position.copy(origin)
+    this._normal.copy(normal)
+    this._rotation = Math.atan2(localXAxis.y, localXAxis.x)
+    this._scaleFactors.set(xAxis.length(), yAxis.length(), zAxis.length())
+
+    this._attribs.forEach(attrib => attrib.transformBy(matrix))
+    return this
   }
 
   /**
@@ -601,7 +816,7 @@ export class AcDbBlockReference extends AcDbEntity {
    */
   get geometricExtents(): AcGeBox3d {
     const box = new AcGeBox3d()
-    const blockTableRecord = this.blockTableRecord
+    const blockTableRecord = this.drawableBlockTableRecord
     if (blockTableRecord != null) {
       const entities = blockTableRecord.newIterator()
       for (const entity of entities) {
@@ -614,13 +829,44 @@ export class AcDbBlockReference extends AcDbEntity {
     return box
   }
 
+  /** @inheritdoc */
+  override subGetIntersectCurves(): AcGeIntersectPrimitive[] {
+    const blockTableRecord = this.drawableBlockTableRecord
+    if (blockTableRecord == null) return []
+
+    const primitives: AcGeIntersectPrimitive[] = []
+    const cols = Math.max(1, this.columnCount)
+    const rows = Math.max(1, this.rowCount)
+    for (let row = 0; row < rows; row++) {
+      for (let col = 0; col < cols; col++) {
+        const localOffset = new AcGeMatrix3d().makeTranslation(
+          col * this.columnSpacing,
+          row * this.rowSpacing,
+          0
+        )
+        const matrix = new AcGeMatrix3d().multiplyMatrices(
+          this.getFullInsertionTransform(),
+          localOffset
+        )
+        for (const entity of blockTableRecord.newIterator()) {
+          primitives.push(
+            ...acdbTransformIntersectPrimitives(
+              entity.subGetIntersectCurves(),
+              matrix
+            )
+          )
+        }
+      }
+    }
+    return primitives
+  }
+
   /**
    * @inheritdoc
    */
   subWorldDraw(renderer: AcGiRenderer) {
-    const blockTableRecord = this.blockTableRecord
+    const blockTableRecord = this.drawableBlockTableRecord
     if (blockTableRecord != null) {
-      const matrix = this.blockTransform
       const attribs: AcGiEntity[] = []
       this._attribs.forEach(attrib => {
         if (!attrib.isInvisible) {
@@ -628,16 +874,44 @@ export class AcDbBlockReference extends AcDbEntity {
           if (result) attribs.push(result)
         }
       })
-      const block = AcDbRenderingCache.instance.draw(
-        renderer,
-        blockTableRecord,
-        this.rgbColor,
-        attribs,
-        true,
-        matrix,
-        this._normal
-      )
-      return block
+      const cols = Math.max(1, this.columnCount)
+      const rows = Math.max(1, this.rowCount)
+      if (cols === 1 && rows === 1) {
+        return AcDbRenderingCache.instance.draw(
+          renderer,
+          blockTableRecord,
+          this.resolvedColor,
+          attribs,
+          true,
+          this.blockTransform,
+          this._normal
+        )
+      }
+      const instances: AcGiEntity[] = []
+      for (let row = 0; row < rows; row++) {
+        for (let col = 0; col < cols; col++) {
+          const localOffset = new AcGeMatrix3d().makeTranslation(
+            col * this.columnSpacing,
+            row * this.rowSpacing,
+            0
+          )
+          const matrix = new AcGeMatrix3d().multiplyMatrices(
+            this.blockTransform,
+            localOffset
+          )
+          const drawn = AcDbRenderingCache.instance.draw(
+            renderer,
+            blockTableRecord,
+            this.resolvedColor,
+            col === 0 && row === 0 ? attribs : [],
+            true,
+            matrix,
+            this._normal
+          )
+          if (drawn) instances.push(drawn)
+        }
+      }
+      return renderer.group(instances)
     } else {
       const block = renderer.group([])
       return block
@@ -645,18 +919,17 @@ export class AcDbBlockReference extends AcDbEntity {
   }
 
   /**
-   * Writes the INSERT entity record and any attached ATTRIB/SEQEND records.
+   * Writes this INSERT entity to DXF, including its attribute sequence.
+   *
+   * The output order follows DXF conventions:
+   *
+   * 1. Emit INSERT common/object fields via the base implementation
+   * 2. Emit one `ATTRIB` section for each attached attribute
+   * 3. Emit a terminating `SEQEND` record when attributes were written
    *
    * @param filer - DXF output writer.
    * @param allXdata - When true, emits all XData attached to this entity.
-   * @returns The entity instance (for chaining).
-   */
-  /**
-   * Writes this object to the DXF output.
-   *
-   * @param filer - DXF output writer.
-   * @param allXdata - When true, emits all XData attached to this object.
-   * @returns The instance (for chaining).
+   * @returns The current entity instance.
    */
   override dxfOut(filer: AcDbDxfFiler, allXdata = false) {
     super.dxfOut(filer, allXdata)
@@ -664,7 +937,7 @@ export class AcDbBlockReference extends AcDbEntity {
     for (const attrib of this.attributeIterator()) {
       hasAttributes = true
       filer.writeStart('ATTRIB')
-      attrib.dxfOut(filer)
+      attrib.dxfOut(filer, allXdata)
     }
     if (hasAttributes) {
       filer.writeStart('SEQEND')
@@ -675,37 +948,199 @@ export class AcDbBlockReference extends AcDbEntity {
     return this
   }
 
+  /**
+   * Collects object snap points from all entities in this block reference.
+   */
+  private collectBlockOsnapPoints(
+    osnapMode: AcDbOsnapMode,
+    pickPoint: AcGePoint3dLike,
+    lastPoint: AcGePoint3dLike,
+    snapPoints: AcGePoint3dLike[],
+    parentInsertionMat: AcGeMatrix3d
+  ) {
+    const blockTableRecord = this.drawableBlockTableRecord
+    if (!blockTableRecord) return
+
+    const thisInsertionMat = new AcGeMatrix3d().multiplyMatrices(
+      parentInsertionMat,
+      this.getFullInsertionTransform()
+    )
+    const inverseMat = thisInsertionMat.clone().invert()
+    const localPickPoint = new AcGePoint3d(pickPoint).applyMatrix4(inverseMat)
+    const localLastPoint = new AcGePoint3d(lastPoint).applyMatrix4(inverseMat)
+    const candidates: AcGePoint3d[] = []
+
+    for (const entity of blockTableRecord.newIterator()) {
+      const localSnapPoints: AcGePoint3d[] = []
+      if (entity instanceof AcDbBlockReference) {
+        entity.subGetOsnapPoints(
+          osnapMode,
+          pickPoint,
+          lastPoint,
+          localSnapPoints,
+          undefined,
+          thisInsertionMat
+        )
+        candidates.push(...localSnapPoints)
+        continue
+      }
+
+      entity.subGetOsnapPoints(
+        osnapMode,
+        localPickPoint,
+        localLastPoint,
+        localSnapPoints,
+        undefined,
+        thisInsertionMat
+      )
+      localSnapPoints.forEach(point =>
+        candidates.push(new AcGePoint3d(point).applyMatrix4(thisInsertionMat))
+      )
+    }
+
+    if (candidates.length === 0) return
+
+    if (
+      osnapMode === AcDbOsnapMode.Nearest ||
+      osnapMode === AcDbOsnapMode.Perpendicular ||
+      osnapMode === AcDbOsnapMode.Tangent
+    ) {
+      const nearest = acdbPickNearestOsnapPoint(pickPoint, candidates)
+      if (nearest) snapPoints.push(nearest)
+    } else {
+      snapPoints.push(...candidates)
+    }
+  }
+
+  /**
+   * Recursively resolves object snap points from nested block references.
+   *
+   * This helper traverses child entities under the current block reference to
+   * locate the sub-entity identified by `gsMark`. When found, it converts
+   * pick/last points into the target local space, asks that entity for snap
+   * points, then maps results back to the caller space as needed.
+   *
+   * The method tracks visited block references to prevent infinite recursion in
+   * cyclic block graphs.
+   *
+   * @param osnapMode - Requested osnap mode.
+   * @param pickPoint - User pick point in caller space.
+   * @param lastPoint - Previous point in caller space.
+   * @param snapPoints - Output collection to append resolved snap points into.
+   * @param gsMark - Object id of the target sub-entity.
+   * @param parentInsertionMat - Cumulative transform from ancestor INSERTs.
+   * @param visitedRefs - Internal recursion guard set.
+   * @returns `true` when the target sub-entity is found and processed, else `false`.
+   */
   private subEntityGetOsnapPoints(
     osnapMode: AcDbOsnapMode,
     pickPoint: AcGePoint3dLike,
     lastPoint: AcGePoint3dLike,
     snapPoints: AcGePoint3dLike[],
-    gsMark: AcDbObjectId
+    gsMark: AcDbObjectId,
+    parentInsertionMat: AcGeMatrix3d,
+    visitedRefs = new Set<AcDbObjectId>()
   ) {
     // Avoid an infinite loop
-    if (gsMark === this.objectId) return
+    if (gsMark === this.objectId || visitedRefs.has(this.objectId)) return false
 
-    const blockTable = this.database?.tables.blockTable
-    if (blockTable != null) {
-      const entity = blockTable.getEntityById(gsMark)
-      if (entity) {
-        const points: AcGePoint3d[] = []
-        entity.subGetOsnapPoints(
-          osnapMode,
-          pickPoint,
-          lastPoint,
-          points,
-          gsMark
-        )
+    visitedRefs.add(this.objectId)
 
-        // Apply matrix to all snap points
-        const matrix = this.blockTransform
-        points.forEach(point => {
-          const tmp = point.clone().applyMatrix4(matrix)
-          snapPoints.push(tmp)
-        })
+    try {
+      const blockTableRecord = this.drawableBlockTableRecord
+      if (blockTableRecord == null) return false
+
+      const thisInsertionMat = new AcGeMatrix3d().multiplyMatrices(
+        parentInsertionMat,
+        this.getFullInsertionTransform()
+      )
+
+      for (const entity of blockTableRecord.newIterator()) {
+        if (entity.objectId === gsMark) {
+          const localPickPoint = new AcGePoint3d(pickPoint).applyMatrix4(
+            thisInsertionMat.clone().invert()
+          )
+          const localLastPoint = new AcGePoint3d(lastPoint).applyMatrix4(
+            thisInsertionMat.clone().invert()
+          )
+          const localSnapPoints: AcGePoint3d[] = []
+
+          entity.subGetOsnapPoints(
+            osnapMode,
+            localPickPoint,
+            localLastPoint,
+            localSnapPoints,
+            gsMark,
+            thisInsertionMat
+          )
+
+          if (entity instanceof AcDbBlockReference) {
+            localSnapPoints.forEach(point => {
+              snapPoints.push(point.clone())
+            })
+          } else {
+            localSnapPoints.forEach(point => {
+              snapPoints.push(
+                new AcGePoint3d(point).applyMatrix4(thisInsertionMat)
+              )
+            })
+          }
+
+          return true
+        }
+
+        if (entity instanceof AcDbBlockReference) {
+          const found = entity.subEntityGetOsnapPoints(
+            osnapMode,
+            pickPoint,
+            lastPoint,
+            snapPoints,
+            gsMark,
+            thisInsertionMat,
+            visitedRefs
+          )
+          if (found) return true
+        }
       }
+
+      return false
+    } finally {
+      visitedRefs.delete(this.objectId)
     }
+  }
+
+  /**
+   * Computes the insertion osnap point in caller space.
+   *
+   * The insertion point is the block definition base point transformed by the
+   * full cumulative insertion transform (ancestor transform + this reference's
+   * own full insertion transform including extrusion).
+   *
+   * @param parentInsertionMat - Cumulative transform from parent block references.
+   * @returns The insertion point in the caller coordinate space.
+   */
+  private getInsertionPoint(parentInsertionMat: AcGeMatrix3d) {
+    const blockBasePoint =
+      this.drawableBlockTableRecord?.origin ?? AcGePoint3d.ORIGIN
+    const insertionMat = new AcGeMatrix3d().multiplyMatrices(
+      parentInsertionMat,
+      this.getFullInsertionTransform()
+    )
+    return new AcGePoint3d(blockBasePoint).applyMatrix4(insertionMat)
+  }
+
+  /**
+   * Builds the full INSERT transform for this block reference.
+   *
+   * {@link blockTransform} contains translation/rotation/scale in OCS only.
+   * This method prepends the extrusion transform derived from {@link normal} so
+   * the returned matrix maps block-local geometry all the way into WCS.
+   *
+   * @returns Full block insertion transform including OCS extrusion.
+   */
+  private getFullInsertionTransform() {
+    const extrusion = new AcGeMatrix3d().setFromExtrusionDirection(this._normal)
+    return new AcGeMatrix3d().multiplyMatrices(extrusion, this.blockTransform)
   }
 
   /**
@@ -723,7 +1158,118 @@ export class AcDbBlockReference extends AcDbEntity {
     filer.writeDouble(42, this.scaleFactors.y)
     filer.writeDouble(43, this.scaleFactors.z)
     filer.writeAngle(50, this.rotation)
+    if (this.columnCount > 1) {
+      filer.writeInt16(70, this.columnCount)
+    }
+    if (this.rowCount > 1) {
+      filer.writeInt16(71, this.rowCount)
+    }
+    if (this.columnSpacing !== 0) {
+      filer.writeDouble(44, this.columnSpacing)
+    }
+    if (this.rowSpacing !== 0) {
+      filer.writeDouble(45, this.rowSpacing)
+    }
     filer.writeVector3d(210, this.normal)
+    return this
+  }
+
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    filer.atSubclassData('AcDbBlockReference')
+
+    let x = this.position.x
+    let y = this.position.y
+    let z = this.position.z
+    let sx = this.scaleFactors.x
+    let sy = this.scaleFactors.y
+    let sz = this.scaleFactors.z
+    let rotDeg = AcGeMathUtil.radToDeg(this.rotation)
+    let nx = this.normal.x
+    let ny = this.normal.y
+    let nz = this.normal.z
+    let columnCount = this.columnCount
+    let rowCount = this.rowCount
+    let columnSpacing = this.columnSpacing
+    let rowSpacing = this.rowSpacing
+
+    const commit = () => {
+      this.position = new AcGePoint3d(x, y, z)
+      this.scaleFactors = new AcGePoint3d(sx, sy, sz)
+      this.rotation = AcGeMathUtil.degToRad(rotDeg)
+      this.normal.copy(new AcGeVector3d(nx, ny, nz))
+      this.columnCount = columnCount > 0 ? columnCount : 1
+      this.rowCount = rowCount > 0 ? rowCount : 1
+      this.columnSpacing = columnSpacing
+      this.rowSpacing = rowSpacing
+    }
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      const n = Number(item.value)
+      switch (code) {
+        case 10:
+          x = n
+          break
+        case 20:
+          y = n
+          break
+        case 30:
+          z = n
+          break
+        case 2:
+          this.blockName = String(item.value)
+          break
+        case 41:
+          sx = n
+          break
+        case 42:
+          sy = n
+          break
+        case 43:
+          sz = n
+          break
+        case 44:
+          columnSpacing = n
+          break
+        case 45:
+          rowSpacing = n
+          break
+        case 50:
+          rotDeg = n
+          break
+        case 66:
+          // Attributes-follow flag — ATTRIB entities are streamed separately.
+          break
+        case 70:
+          columnCount = n
+          break
+        case 71:
+          rowCount = n
+          break
+        case 210:
+          nx = n
+          break
+        case 220:
+          ny = n
+          break
+        case 230:
+          nz = n
+          break
+        case 100:
+          // Next subclass (e.g. AcDbTable) — hand off.
+          filer.pushBackItem(item)
+          commit()
+          return this
+        default:
+          // Unknown optional INSERT codes — keep scanning within this subclass.
+          break
+      }
+    }
+
+    commit()
     return this
   }
 }

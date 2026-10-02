@@ -1,12 +1,11 @@
 import {
-  AcGeBox3d,
+  AcGeMatrix3d,
   AcGePoint3d,
   AcGePoint3dLike
 } from '@mlightcad/geometry-engine'
-import { AcGiLineArrowStyle } from '@mlightcad/graphic-interface'
 
 import { AcDbDxfFiler } from '../../base'
-import { AcDbLine } from '../AcDbLine'
+import { AcDbEntityProperties } from '../AcDbEntityProperties'
 import { AcDbDimension } from './AcDbDimension'
 
 /**
@@ -245,6 +244,10 @@ export class AcDbRadialDimension extends AcDbDimension {
     return this._leaderLength
   }
 
+  set leaderLength(value: number) {
+    this._leaderLength = value
+  }
+
   /**
    * Sets the leader length.
    *
@@ -259,21 +262,82 @@ export class AcDbRadialDimension extends AcDbDimension {
     this._leaderLength = value
   }
 
-  /**
-   * @inheritdoc
-   */
-  get geometricExtents() {
-    // TODO: Finish it
-    return new AcGeBox3d()
+  override get properties(): AcDbEntityProperties {
+    const baseProperties = this.getBaseProperties()
+    return {
+      type: this.type,
+      groups: [
+        ...baseProperties.groups,
+        {
+          groupName: 'geometry',
+          properties: [
+            ...this.createPoint3dProperties('center', () => this.center),
+            ...this.createPoint3dProperties(
+              'chordPoint',
+              () => this.chordPoint
+            ),
+            this.createProperty(
+              'leaderLength',
+              'float',
+              () => this.leaderLength,
+              (value: number) => {
+                this.leaderLength = value
+              }
+            ),
+            this.createProperty(
+              'extArcStartAngle',
+              'float',
+              () => this.extArcStartAngle,
+              (value: number) => {
+                this.extArcStartAngle = value
+              }
+            ),
+            this.createProperty(
+              'extArcEndAngle',
+              'float',
+              () => this.extArcEndAngle,
+              (value: number) => {
+                this.extArcEndAngle = value
+              }
+            )
+          ]
+        }
+      ]
+    }
   }
 
   /**
    * @inheritdoc
    */
-  protected getLineArrowStyle(_line: AcDbLine): AcGiLineArrowStyle | undefined {
-    return {
-      secondArrow: this.secondArrowStyle
+  protected override collectDimensionDefinitionGripPoints() {
+    return [this.center, this.chordPoint]
+  }
+
+  /**
+   * @inheritdoc
+   */
+  protected override subTransformBy(matrix: AcGeMatrix3d) {
+    this._center.applyMatrix4(matrix)
+    this._chordPoint.applyMatrix4(matrix)
+  }
+
+  protected override getMeasurementPropertyValue() {
+    return this.measurement ?? this.center.distanceTo(this.chordPoint)
+  }
+
+  /**
+   * @inheritdoc
+   */
+  get geometricExtents() {
+    const points = [this.center, this.chordPoint]
+    if (this.leaderLength > 0) {
+      const direction = this.chordPoint.clone().sub(this.center)
+      if (direction.lengthSq() > 0) {
+        direction.normalize().multiplyScalar(this.leaderLength)
+        points.push(this.chordPoint.clone().add(direction))
+      }
     }
+    return this.getGeometricExtentsFromDimBlockOrPoints(points)
   }
 
   /**
@@ -290,6 +354,75 @@ export class AcDbRadialDimension extends AcDbDimension {
     filer.writeDouble(40, this.leaderLength)
     filer.writeAngle(52, this.extArcStartAngle)
     filer.writeAngle(53, this.extArcEndAngle)
+    return this
+  }
+
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    filer.atSubclassData('AcDbRadialDimension')
+
+    // Match AutoCAD DXF / dxf-json-converter:
+    // group 10 (definition point) = center, group 15 = chord point.
+    const cx = this._dxfDefinitionPoint.x
+    const cy = this._dxfDefinitionPoint.y
+    const cz = this._dxfDefinitionPoint.z
+    let hx = this.chordPoint.x
+    let hy = this.chordPoint.y
+    let hz = this.chordPoint.z
+    let hasChord = false
+    let startDeg = (this.extArcStartAngle * 180) / Math.PI
+    let endDeg = (this.extArcEndAngle * 180) / Math.PI
+
+    const commit = () => {
+      this.center = new AcGePoint3d(cx, cy, cz)
+      this.chordPoint = new AcGePoint3d(hx, hy, hz)
+      this.extArcStartAngle = (startDeg * Math.PI) / 180
+      this.extArcEndAngle = (endDeg * Math.PI) / 180
+    }
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      const n = Number(item.value)
+      switch (code) {
+        case 15:
+          hx = n
+          hasChord = true
+          break
+        case 25:
+          hy = n
+          hasChord = true
+          break
+        case 35:
+          hz = n
+          hasChord = true
+          break
+        case 13:
+          // ObjectARX write uses 13 for chord; prefer 15 when both exist.
+          if (!hasChord) hx = n
+          break
+        case 23:
+          if (!hasChord) hy = n
+          break
+        case 33:
+          if (!hasChord) hz = n
+          break
+        case 40:
+          this.leaderLength = n
+          break
+        case 52:
+          startDeg = n
+          break
+        case 53:
+          endDeg = n
+          break
+        default:
+          break
+      }
+    }
+
+    commit()
     return this
   }
 }

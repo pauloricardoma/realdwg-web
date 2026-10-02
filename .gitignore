@@ -7,6 +7,9 @@ lib
 tmp
 tsconfig.tsbuildinfo
 
+# Private package — clone locally; never commit
+packages/dwg-converter
+
 # dependencies
 node_modules
 
@@ -38,6 +41,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+coverage/
 
 # System Files
 .DS_Store

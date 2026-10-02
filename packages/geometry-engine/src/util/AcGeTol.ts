@@ -50,6 +50,16 @@ export class AcGeTol {
   }
 
   /**
+   * Return a cloned tolerance object.
+   */
+  clone() {
+    const cloned = new AcGeTol()
+    cloned.equalPointTol = this.equalPointTol
+    cloned.equalVectorTol = this.equalVectorTol
+    return cloned
+  }
+
+  /**
    * Return true if two points are equal with the specified tolerance.
    * @param p1 Input the first 2d point
    * @param p2 Input the second 2d point
@@ -122,6 +132,20 @@ export class AcGeTol {
    */
   static less(value1: number, value2: number, tol: number = FLOAT_TOL) {
     return value1 - value2 < tol
+  }
+
+  /**
+   * Return true if the value is greater than the specified tolerance.
+   */
+  static isPositive(value: number, tol: number = FLOAT_TOL): boolean {
+    return value > tol
+  }
+
+  /**
+   * Return true if the value is less than or equal to the specified tolerance.
+   */
+  static isNonPositive(value: number, tol: number = FLOAT_TOL): boolean {
+    return value <= tol
   }
 }
 

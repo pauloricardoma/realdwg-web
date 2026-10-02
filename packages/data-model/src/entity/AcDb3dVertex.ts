@@ -2,13 +2,15 @@ import {
   AcGeBox3d,
   AcGeMatrix3d,
   AcGePoint3d,
-  AcGePoint3dLike
+  AcGePoint3dLike,
+  AcGeVector3dLike
 } from '@mlightcad/geometry-engine'
 import { AcGiRenderer } from '@mlightcad/graphic-interface'
 
-import { AcDbDxfFiler } from '../base'
-import { AcDbOsnapMode } from '../misc'
+import { AcDbDxfFiler } from '../base/AcDbDxfFiler'
+import { AcDbOsnapMode } from '../misc/AcDbOsnapMode'
 import { AcDbEntity } from './AcDbEntity'
+import { acdbMovePrimaryGripPointAt } from './AcDbGripHelpers'
 
 export enum AcDb3dVertexType {
   /**
@@ -106,6 +108,12 @@ export class AcDb3dVertex extends AcDbEntity {
     return gripPoints
   }
 
+  /** @inheritdoc */
+  subMoveGripPointsAt(indices: number[], offset: AcGeVector3dLike) {
+    acdbMovePrimaryGripPointAt(indices, offset, this._position)
+    return this
+  }
+
   /**
    * Gets the object snap points for this vertex.
    *
@@ -119,12 +127,17 @@ export class AcDb3dVertex extends AcDbEntity {
    * @param snapPoints - Array to populate with snap points
    */
   subGetOsnapPoints(
-    _osnapMode: AcDbOsnapMode,
+    osnapMode: AcDbOsnapMode,
     _pickPoint: AcGePoint3dLike,
     _lastPoint: AcGePoint3dLike,
     snapPoints: AcGePoint3dLike[]
   ) {
-    snapPoints.push(this._position)
+    if (
+      osnapMode === AcDbOsnapMode.EndPoint ||
+      osnapMode === AcDbOsnapMode.Node
+    ) {
+      snapPoints.push(this._position)
+    }
   }
 
   /**

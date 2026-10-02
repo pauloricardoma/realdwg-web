@@ -1,16 +1,27 @@
 import {
   AcGeBox3d,
+  AcGeIntersectPrimitive,
+  AcGeMatrix3d,
+  AcGePoint2d,
   AcGePoint3d,
   AcGePoint3dLike,
   AcGePolyline2d,
-  AcGePolyline2dVertex
+  AcGePolyline2dVertex,
+  AcGeVector3dLike
 } from '@mlightcad/geometry-engine'
 import { AcGiRenderer } from '@mlightcad/graphic-interface'
 
-import { AcDbDxfFiler } from '../base'
-import { AcDbOsnapMode } from '../misc'
+import { AcDbDxfFiler } from '../base/AcDbDxfFiler'
+import { AcDbOsnapMode } from '../misc/AcDbOsnapMode'
 import { AcDbCurve } from './AcDbCurve'
 import { AcDbEntityProperties } from './AcDbEntityProperties'
+import { acdbForEachGripIndex } from './AcDbGripHelpers'
+import { acdbIntersectPrimitivesFromPointPath } from './AcDbIntersectHelpers'
+import {
+  acdbCollectLineSegmentOsnapPoints,
+  acdbPickNearestOsnapPoint
+} from './AcDbOsnapHelpers'
+import { AcDbPolyline } from './AcDbPolyline'
 
 /**
  * Represents the spline-fit type for this 3D polyline.
@@ -95,6 +106,11 @@ export class AcDb3dPolyline extends AcDbCurve {
     return this._geo.closed
   }
 
+  /** @inheritdoc */
+  get area(): number {
+    return 0
+  }
+
   /**
    * Sets whether this polyline is closed.
    *
@@ -114,7 +130,9 @@ export class AcDb3dPolyline extends AcDbCurve {
   }
 
   getPointAt(index: number) {
-    return this._geo.getPointAt(index)
+    const vertex = this._geo.vertices[index] as AcGePolyline2dVertex &
+      AcGePoint3dLike
+    return new AcGePoint3d(vertex.x, vertex.y, vertex.z || 0)
   }
 
   /**
@@ -129,12 +147,20 @@ export class AcDb3dPolyline extends AcDbCurve {
    * ```
    */
   get geometricExtents(): AcGeBox3d {
-    const box = this._geo.box
-    // TODO: Set the correct z value for 3d box
-    return new AcGeBox3d(
-      { x: box.min.x, y: box.min.y, z: 0 },
-      { x: box.max.x, y: box.max.y, z: 0 }
+    const points = this._geo.vertices.map(
+      vertex =>
+        new AcGePoint3d(vertex.x, vertex.y, (vertex as AcGePoint3dLike).z || 0)
     )
+    return new AcGeBox3d().setFromPoints(points)
+  }
+
+  /** @inheritdoc */
+  override subGetIntersectCurves(): AcGeIntersectPrimitive[] {
+    const points: AcGePoint3d[] = []
+    for (let i = 0; i < this.numberOfVertices; i++) {
+      points.push(this.getPointAt(i))
+    }
+    return acdbIntersectPrimitivesFromPointPath(points, this.closed)
   }
 
   /**
@@ -148,10 +174,17 @@ export class AcDb3dPolyline extends AcDbCurve {
   subGetGripPoints() {
     const gripPoints = new Array<AcGePoint3d>()
     for (let i = 0; i < this._geo.numberOfVertices; ++i) {
-      const temp = this._geo.getPointAt(i)
-      gripPoints.push(new AcGePoint3d(temp.x, temp.y, 0))
+      gripPoints.push(this.getPointAt(i))
     }
     return gripPoints
+  }
+
+  /** @inheritdoc */
+  subMoveGripPointsAt(indices: number[], offset: AcGeVector3dLike) {
+    acdbForEachGripIndex(indices, index => {
+      this.moveVertexAt(index, offset)
+    })
+    return this
   }
 
   /**
@@ -168,22 +201,68 @@ export class AcDb3dPolyline extends AcDbCurve {
    */
   subGetOsnapPoints(
     osnapMode: AcDbOsnapMode,
-    _pickPoint: AcGePoint3dLike,
+    pickPoint: AcGePoint3dLike,
     _lastPoint: AcGePoint3dLike,
     snapPoints: AcGePoint3dLike[]
   ) {
+    const vertices = Array.from(
+      { length: this._geo.numberOfVertices },
+      (_, i) => this.getPointAt(i)
+    )
+    if (vertices.length === 0) return
+
     switch (osnapMode) {
       case AcDbOsnapMode.EndPoint:
-        {
-          for (let i = 0; i < this._geo.numberOfVertices; ++i) {
-            const temp = this._geo.getPointAt(i)
-            snapPoints.push(new AcGePoint3d(temp.x, temp.y, 0))
-          }
+        snapPoints.push(...vertices)
+        break
+      case AcDbOsnapMode.MidPoint:
+      case AcDbOsnapMode.Nearest:
+      case AcDbOsnapMode.Perpendicular: {
+        const candidates: AcGePoint3d[] = []
+        for (let index = 0; index < vertices.length - 1; index++) {
+          const segmentSnaps: AcGePoint3d[] = []
+          acdbCollectLineSegmentOsnapPoints(
+            vertices[index],
+            vertices[index + 1],
+            osnapMode,
+            pickPoint,
+            segmentSnaps
+          )
+          candidates.push(...segmentSnaps)
+        }
+        if (osnapMode === AcDbOsnapMode.MidPoint) {
+          snapPoints.push(...candidates)
+        } else {
+          const nearest = acdbPickNearestOsnapPoint(pickPoint, candidates)
+          if (nearest) snapPoints.push(nearest)
         }
         break
+      }
       default:
         break
     }
+  }
+
+  /**
+   * Transforms this 3D polyline by the specified matrix.
+   */
+  transformBy(matrix: AcGeMatrix3d) {
+    this._geo.vertices.forEach(vertex => {
+      const transformedPoint = new AcGePoint3d(
+        vertex.x,
+        vertex.y,
+        (vertex as AcGePoint3dLike).z || 0
+      ).applyMatrix4(matrix)
+      vertex.x = transformedPoint.x
+      vertex.y = transformedPoint.y
+      ;(vertex as AcGePoint3dLike).z = transformedPoint.z
+    })
+    ;(
+      this._geo as AcGePolyline2d<AcGePolyline2dVertex> & {
+        _boundingBoxNeedsUpdate: boolean
+      }
+    )._boundingBoxNeedsUpdate = true
+    return this
   }
 
   /**
@@ -261,17 +340,24 @@ export class AcDb3dPolyline extends AcDbCurve {
   }
 
   /**
+   * This 3d polyline always draws as a single `lineStrip` primitive.
+   *
+   * @internal
+   */
+  override get directBatchPrimitive() {
+    return 'lineStrip' as const
+  }
+
+  /**
    * Draws this polyline using the specified renderer.
    *
    * @param renderer - The renderer to use for drawing
    * @returns The rendered polyline entity, or undefined if drawing failed
    */
   subWorldDraw(renderer: AcGiRenderer) {
-    const points: AcGePoint3d[] = []
-    const tmp = this._geo.getPoints(100)
-    // TODO: Set the correct z value
-    tmp.forEach(point =>
-      points.push(new AcGePoint3d().set(point.x, point.y, 0))
+    const points = this._geo.vertices.map(
+      vertex =>
+        new AcGePoint3d(vertex.x, vertex.y, (vertex as AcGePoint3dLike).z || 0)
     )
     return renderer.lines(points)
   }
@@ -305,7 +391,7 @@ export class AcDb3dPolyline extends AcDbCurve {
       filer.writePoint3d(10, {
         x: point.x,
         y: point.y,
-        z: 0
+        z: point.z
       })
       filer.writeInt16(70, 32)
     }
@@ -338,5 +424,114 @@ export class AcDb3dPolyline extends AcDbCurve {
     filer.writeInt16(66, this.numberOfVertices > 0 ? 1 : 0)
     filer.writeInt16(70, flag)
     return this
+  }
+
+  /**
+   * {@inheritDoc AcDbCurve.getOffsetCurves}
+   *
+   * Offsets the XY projection of the 3D path, then restores elevation on each result
+   * vertex by interpolating Z from the original polyline segments.
+   */
+  override getOffsetCurves(offsetDist: number): AcDbCurve[] {
+    const curve = this.createOffsetCurve(offsetDist)
+    return curve ? [curve] : []
+  }
+
+  /**
+   * {@inheritDoc AcDbCurve.getOffsetSideAtPoint}
+   *
+   * Uses the sampled 2D projection of this polyline for the side test.
+   */
+  override getOffsetSideAtPoint(point: AcGePoint3dLike): 1 | -1 {
+    const path = this.collectPath2d()
+    if (path.length < 2) return 1
+    return AcDbPolyline.from2dPoints(path, this.closed).getOffsetSideAtPoint(
+      point
+    )
+  }
+
+  /**
+   * Offsets in XY and lifts vertices back to 3D with {@link interpolateZ}.
+   *
+   * @param offsetDist - Signed offset distance in drawing units
+   * @returns A new 3D polyline with the same spline-fit type and closed flag, or `null`
+   * when offsetting fails
+   */
+  private createOffsetCurve(offsetDist: number): AcDb3dPolyline | null {
+    const results = this._geo.offset(offsetDist)
+    if (results.length === 0) return null
+
+    const offsetPolyline = results[0]
+    const vertices: AcGePoint3dLike[] = []
+    for (let i = 0; i < offsetPolyline.numberOfVertices; i++) {
+      const point2d = offsetPolyline.getPointAt(i)
+      vertices.push(
+        new AcGePoint3d(
+          point2d.x,
+          point2d.y,
+          this.interpolateZ(point2d.x, point2d.y)
+        )
+      )
+    }
+    return new AcDb3dPolyline(this.polyType, vertices, this.closed)
+  }
+
+  /**
+   * Samples the underlying geometry into a 2D path used for planar offset.
+   *
+   * @returns XY points along the 3D polyline projection
+   */
+  private collectPath2d(): AcGePoint2d[] {
+    const sampleCount = Math.max(32, this.numberOfVertices * 4)
+    return this._geo.getPoints(sampleCount)
+  }
+
+  /**
+   * Estimates the Z coordinate at a planar point by projecting onto the original segments.
+   *
+   * For each segment (respecting {@link closed}), finds the closest point in XY and
+   * linearly interpolates Z between the segment endpoints. Used when promoting a 2D
+   * offset polyline back to {@link AcDb3dPolyline}.
+   *
+   * @param x - X coordinate in WCS
+   * @param y - Y coordinate in WCS
+   * @returns Interpolated elevation, or `0` when the polyline has no vertices
+   */
+  private interpolateZ(x: number, y: number): number {
+    const count = this.numberOfVertices
+    if (count <= 0) return 0
+
+    let bestDist = Infinity
+    let bestZ = this.getPointAt(0).z
+    const segCount = this.closed ? count : count - 1
+    for (let i = 0; i < segCount; i++) {
+      const a = this.getPointAt(i)
+      const b = this.getPointAt((i + 1) % count)
+      const dx = b.x - a.x
+      const dy = b.y - a.y
+      const len2 = dx * dx + dy * dy
+      if (len2 === 0) continue
+      const t = Math.max(
+        0,
+        Math.min(1, ((x - a.x) * dx + (y - a.y) * dy) / len2)
+      )
+      const px = a.x + dx * t
+      const py = a.y + dy * t
+      const dist = (x - px) ** 2 + (y - py) ** 2
+      if (dist < bestDist) {
+        bestDist = dist
+        bestZ = a.z + (b.z - a.z) * t
+      }
+    }
+    return bestZ
+  }
+
+  private moveVertexAt(index: number, offset: AcGeVector3dLike) {
+    const vertex = this._geo.vertices[index]
+    if (!vertex) return
+    vertex.x += offset.x
+    vertex.y += offset.y
+    const point = vertex as AcGePoint3dLike
+    point.z = (point.z ?? 0) + (offset.z ?? 0)
   }
 }

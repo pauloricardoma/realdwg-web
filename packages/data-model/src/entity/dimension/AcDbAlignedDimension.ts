@@ -1,17 +1,18 @@
 import { AcCmColor, AcCmColorMethod } from '@mlightcad/common'
 import {
-  AcGeBox3d,
   AcGeLine3d,
+  AcGeMatrix3d,
   AcGePoint3d,
   AcGePoint3dLike,
   AcGePointLike,
-  AcGeVector3d
+  AcGeVector3d,
+  AcGeVector3dLike
 } from '@mlightcad/geometry-engine'
-import { AcGiMTextAttachmentPoint } from '@mlightcad/graphic-interface'
 
 import { AcDbDxfFiler } from '../../base'
 import { AcDbBlockTableRecord } from '../../database'
 import { AcDbBlockReference } from '../AcDbBlockReference'
+import { AcDbEntityProperties } from '../AcDbEntityProperties'
 import { AcDbLine } from '../AcDbLine'
 import { AcDbMText } from '../AcDbMText'
 import { AcDbDimension } from './AcDbDimension'
@@ -266,12 +267,82 @@ export class AcDbAlignedDimension extends AcDbDimension {
     this._oblique = value
   }
 
+  override get properties(): AcDbEntityProperties {
+    const baseProperties = this.getBaseProperties()
+    return {
+      type: this.type,
+      groups: [
+        ...baseProperties.groups,
+        {
+          groupName: 'geometry',
+          properties: [
+            ...this.createPoint3dProperties(
+              'xLine1Point',
+              () => this.xLine1Point
+            ),
+            ...this.createPoint3dProperties(
+              'xLine2Point',
+              () => this.xLine2Point
+            ),
+            ...this.createPoint3dProperties(
+              'dimLinePoint',
+              () => this.dimLinePoint
+            ),
+            this.createProperty(
+              'rotation',
+              'float',
+              () => this.rotation,
+              (value: number) => {
+                this.rotation = value
+              }
+            ),
+            this.createProperty(
+              'oblique',
+              'float',
+              () => this.oblique,
+              (value: number) => {
+                this.oblique = value
+              }
+            )
+          ]
+        }
+      ]
+    }
+  }
+
+  /**
+   * @inheritdoc
+   */
+  protected override collectDimensionDefinitionGripPoints() {
+    return [this.xLine1Point, this.xLine2Point, this.dimLinePoint]
+  }
+
+  /** @inheritdoc */
+  override subMoveGripPointsAt(indices: number[], offset: AcGeVector3dLike) {
+    super.subMoveGripPointsAt(indices, offset)
+    this.calculateRotation()
+    return this
+  }
+
+  /**
+   * @inheritdoc
+   */
+  protected override subTransformBy(matrix: AcGeMatrix3d) {
+    this._dimLinePoint.applyMatrix4(matrix)
+    this._xLine1Point.applyMatrix4(matrix)
+    this._xLine2Point.applyMatrix4(matrix)
+    this.calculateRotation()
+  }
+
   /**
    * @inheritdoc
    */
   get geometricExtents() {
-    // TODO: Finish it
-    return new AcGeBox3d()
+    return this.getGeometricExtentsFromDimBlockOrPoints([
+      this.xLine1Point,
+      this.xLine2Point,
+      this.dimLinePoint
+    ])
   }
 
   /**
@@ -313,7 +384,7 @@ export class AcDbAlignedDimension extends AcDbDimension {
 
     if (this.dimensionText) {
       const mtext = new AcDbMText()
-      mtext.attachmentPoint = AcGiMTextAttachmentPoint.MiddleLeft
+      mtext.attachmentPoint = this.attachmentPoint
       mtext.layer = '0'
       mtext.color = new AcCmColor(AcCmColorMethod.ByBlock)
       mtext.location = pos
@@ -429,6 +500,17 @@ export class AcDbAlignedDimension extends AcDbDimension {
   }
 
   /**
+   * DXF subclass marker written for this dimension subtype.
+   */
+  protected get dxfSubclassMarker() {
+    return 'AcDbAlignedDimension'
+  }
+
+  protected override getMeasurementPropertyValue() {
+    return this.measurement ?? this.xLine1Point.distanceTo(this.xLine2Point)
+  }
+
+  /**
    * Writes DXF fields for this object.
    *
    * @param filer - DXF output writer.
@@ -436,12 +518,174 @@ export class AcDbAlignedDimension extends AcDbDimension {
    */
   override dxfOutFields(filer: AcDbDxfFiler) {
     super.dxfOutFields(filer)
-    filer.writeSubclassMarker('AcDbAlignedDimension')
+    filer.writeSubclassMarker(this.dxfSubclassMarker)
     filer.writePoint3d(13, this.xLine1Point)
     filer.writePoint3d(14, this.xLine2Point)
     filer.writePoint3d(15, this.dimLinePoint)
     filer.writeAngle(50, this.rotation)
     filer.writeAngle(52, this.oblique)
     return this
+  }
+
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    filer.atSubclassData(this.dxfSubclassMarker)
+
+    let x1 = this.xLine1Point.x
+    let y1 = this.xLine1Point.y
+    let z1 = this.xLine1Point.z
+    let x2 = this.xLine2Point.x
+    let y2 = this.xLine2Point.y
+    let z2 = this.xLine2Point.z
+    let dx = this.dimLinePoint.x
+    let dy = this.dimLinePoint.y
+    let dz = this.dimLinePoint.z
+    let rotDeg = (this.rotation * 180) / Math.PI
+    let oblDeg = (this.oblique * 180) / Math.PI
+    let ix = this.dimBlockPosition.x
+    let iy = this.dimBlockPosition.y
+    let iz = this.dimBlockPosition.z
+    let hasInsertion = false
+    let hasDimLine = false
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      const n = Number(item.value)
+      switch (code) {
+        case 12:
+          ix = n
+          hasInsertion = true
+          break
+        case 22:
+          iy = n
+          hasInsertion = true
+          break
+        case 32:
+          iz = n
+          hasInsertion = true
+          break
+        case 13:
+          x1 = n
+          break
+        case 23:
+          y1 = n
+          break
+        case 33:
+          z1 = n
+          break
+        case 14:
+          x2 = n
+          break
+        case 24:
+          y2 = n
+          break
+        case 34:
+          z2 = n
+          break
+        case 15:
+          dx = n
+          hasDimLine = true
+          break
+        case 25:
+          dy = n
+          hasDimLine = true
+          break
+        case 35:
+          dz = n
+          hasDimLine = true
+          break
+        case 50:
+          rotDeg = n
+          break
+        case 52:
+          oblDeg = n
+          break
+        case 100:
+          filer.pushBackItem(item)
+          this.finishAlignedDxfIn(
+            x1,
+            y1,
+            z1,
+            x2,
+            y2,
+            z2,
+            dx,
+            dy,
+            dz,
+            rotDeg,
+            oblDeg,
+            ix,
+            iy,
+            iz,
+            hasInsertion,
+            hasDimLine
+          )
+          return this
+        default:
+          break
+      }
+    }
+
+    this.finishAlignedDxfIn(
+      x1,
+      y1,
+      z1,
+      x2,
+      y2,
+      z2,
+      dx,
+      dy,
+      dz,
+      rotDeg,
+      oblDeg,
+      ix,
+      iy,
+      iz,
+      hasInsertion,
+      hasDimLine
+    )
+    return this
+  }
+
+  private finishAlignedDxfIn(
+    x1: number,
+    y1: number,
+    z1: number,
+    x2: number,
+    y2: number,
+    z2: number,
+    dx: number,
+    dy: number,
+    dz: number,
+    rotDeg: number,
+    oblDeg: number,
+    ix: number,
+    iy: number,
+    iz: number,
+    hasInsertion: boolean,
+    hasDimLine: boolean
+  ) {
+    this.xLine1Point = { x: x1, y: y1, z: z1 }
+    this.xLine2Point = { x: x2, y: y2, z: z2 }
+    // AutoCAD aligned/rotated dims store the dim-line point as group 10
+    // (AcDbDimension definition point). Group 15 is rare.
+    if (hasDimLine) {
+      this.dimLinePoint = { x: dx, y: dy, z: dz }
+    } else {
+      this.dimLinePoint = {
+        x: this._dxfDefinitionPoint.x,
+        y: this._dxfDefinitionPoint.y,
+        z: this._dxfDefinitionPoint.z
+      }
+    }
+    this.rotation = (rotDeg * Math.PI) / 180
+    this.oblique = (oblDeg * Math.PI) / 180
+    // Match dxf-json-converter: group 12 (clone insertion) sets dim block
+    // position when present; otherwise leave at origin (do not use group 10).
+    if (hasInsertion) {
+      this.dimBlockPosition = { x: ix, y: iy, z: iz }
+    }
   }
 }

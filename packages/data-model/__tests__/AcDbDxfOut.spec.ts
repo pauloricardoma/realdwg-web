@@ -1,11 +1,16 @@
 import { AcDbDatabase } from '../src/database/AcDbDatabase'
+import { acdbHostApplicationServices } from '../src/base'
 import { AcDbBlockTableRecord } from '../src/database/AcDbBlockTableRecord'
 import { AcDbAttribute } from '../src/entity/AcDbAttribute'
 import { AcDbBlockReference } from '../src/entity/AcDbBlockReference'
 import { AcDbLine } from '../src/entity/AcDbLine'
+import { AcDbMLeader } from '../src/entity/AcDbMLeader'
+import { AcDbMLine } from '../src/entity/AcDbMLine'
 import { AcDbPolyline } from '../src/entity/AcDbPolyline'
+import { AcDbProxyEntity, AcDbRotatedDimension, AcDbSolid } from '../src/entity'
 import { AcDbTable } from '../src/entity/AcDbTable'
 import { AcDbText } from '../src/entity/AcDbText'
+import { AcDbMLeaderStyle } from '../src/object'
 import { AcDbLayout } from '../src/object/layout/AcDbLayout'
 import { AcGePoint2d } from '@mlightcad/geometry-engine'
 import { AcGePoint3d } from '@mlightcad/geometry-engine'
@@ -22,14 +27,21 @@ interface DxfRecord {
   pairs: DxfPair[]
 }
 
-function getSection(dxf: string, name: string) {
+/** ASCII dxfOut result as string (binary mode returns Uint8Array). */
+function asAsciiDxf(dxf: string | Uint8Array): string {
+  expect(typeof dxf).toBe('string')
+  return dxf as string
+}
+
+function getSection(dxf: string | Uint8Array, name: string) {
+  const text = asAsciiDxf(dxf)
   const startMarker = `0\nSECTION\n2\n${name}\n`
-  const start = dxf.indexOf(startMarker)
+  const start = text.indexOf(startMarker)
   expect(start).toBeGreaterThanOrEqual(0)
 
-  const end = dxf.indexOf('\n0\nENDSEC\n', start + startMarker.length)
+  const end = text.indexOf('\n0\nENDSEC\n', start + startMarker.length)
   expect(end).toBeGreaterThan(start)
-  return dxf.slice(start + startMarker.length, end + 1)
+  return text.slice(start + startMarker.length, end + 1)
 }
 
 function parseRecords(content: string): DxfRecord[] {
@@ -83,7 +95,7 @@ describe('AcDbDatabase.dxfOut', () => {
     const db = new AcDbDatabase()
     db.createDefaultData()
 
-    const dxf = db.dxfOut(undefined, 6)
+    const dxf = asAsciiDxf(db.dxfOut(undefined, 6))
 
     const headerIndex = dxf.indexOf('0\nSECTION\n2\nHEADER\n')
     const tablesIndex = dxf.indexOf('0\nSECTION\n2\nTABLES\n')
@@ -101,6 +113,10 @@ describe('AcDbDatabase.dxfOut', () => {
 
     expect(dxf).toContain('9\n$ACADVER\n1\nAC1014\n')
     expect(dxf).toContain('9\n$CLAYER\n8\n0\n')
+    expect(dxf).toContain('9\n$CELTYPE\n6\nByLayer\n')
+    expect(dxf).toContain('9\n$CMLSTYLE\n2\nStandard\n')
+    expect(dxf).toContain('9\n$CMLSCALE\n40\n1\n')
+    expect(dxf).toContain('9\n$CMLEADERSTYLE\n2\nStandard\n')
     expect(dxf).toContain('0\nTABLE\n2\nLAYER\n')
     expect(dxf).toContain('0\nLAYER\n')
     expect(dxf).toContain('2\n0\n')
@@ -168,6 +184,38 @@ describe('AcDbDatabase.dxfOut', () => {
     expect(valuesByCode(lwPolylineRecord!, '20')).toEqual(['0', '0', '5'])
   })
 
+  it('writes common DIMENSION fields including block name and text metadata', () => {
+    const db = new AcDbDatabase()
+    db.createDefaultData()
+
+    const dimension = new AcDbRotatedDimension(
+      new AcGePoint3d(0, 0, 0),
+      new AcGePoint3d(10, 0, 0),
+      new AcGePoint3d(5, 2, 0)
+    )
+    dimension.dimBlockId = '__DIM_BLOCK_TEST__'
+    dimension.dimensionStyleName = 'Standard'
+    dimension.dimensionText = '10.000'
+    dimension.textLineSpacingStyle = 2
+    dimension.textLineSpacingFactor = 1.25
+    dimension.measurement = 10
+    db.tables.blockTable.modelSpace.appendEntity(dimension)
+
+    const entities = parseRecords(
+      getSection(db.dxfOut(undefined, 6), 'ENTITIES')
+    )
+    const dimensionRecord = findRecord(entities, 'DIMENSION', record =>
+      valuesByCode(record, '100').includes('AcDbDimension')
+    )
+
+    expect(dimensionRecord).toBeDefined()
+    expect(valuesByCode(dimensionRecord!, '280')).toContain('0')
+    expect(valuesByCode(dimensionRecord!, '2')).toContain('__DIM_BLOCK_TEST__')
+    expect(valuesByCode(dimensionRecord!, '72')).toContain('2')
+    expect(valuesByCode(dimensionRecord!, '41')).toContain('1.25')
+    expect(valuesByCode(dimensionRecord!, '42')).toContain('10')
+  })
+
   it('writes block definitions and insert attributes to BLOCKS and ENTITIES sections', () => {
     const db = new AcDbDatabase()
     db.createDefaultData()
@@ -230,6 +278,63 @@ describe('AcDbDatabase.dxfOut', () => {
 
     const seqendRecord = findRecord(entityRecords, 'SEQEND')
     expect(seqendRecord).toBeDefined()
+  })
+
+  it('uses the database CELTYPE for new entities without an explicit linetype', () => {
+    const db = new AcDbDatabase()
+    db.createDefaultData()
+    db.celtype = 'Continuous'
+
+    const line = new AcDbLine({ x: 0, y: 0, z: 0 }, { x: 10, y: 5, z: 0 })
+    db.tables.blockTable.modelSpace.appendEntity(line)
+
+    expect(line.lineType).toBe('Continuous')
+  })
+
+  it('uses the database CMLSTYLE for new mline entities without an explicit style', () => {
+    const db = new AcDbDatabase()
+    db.createDefaultData()
+    db.cmlstyle = 'FILL'
+
+    const mline = new AcDbMLine()
+    mline.startPosition = new AcGePoint3d(0, 0, 0)
+    mline.segments = [
+      {
+        position: { x: 10, y: 0, z: 0 },
+        direction: { x: 1, y: 0, z: 0 },
+        miterDirection: { x: 0, y: 1, z: 0 },
+        elements: []
+      }
+    ]
+    db.tables.blockTable.modelSpace.appendEntity(mline)
+
+    expect(mline.styleName).toBe('FILL')
+    expect(asAsciiDxf(db.dxfOut(undefined, 6))).toContain('\n2\nFILL\n')
+  })
+
+  it('uses the database CMLEADERSTYLE for new mleader entities without an explicit style', () => {
+    const db = new AcDbDatabase()
+    db.createDefaultData()
+
+    const baseStyle = new AcDbMLeaderStyle()
+    db.objects.mleaderStyle.setAt('BASE', baseStyle)
+    const activeStyle = new AcDbMLeaderStyle()
+    db.objects.mleaderStyle.setAt('ACTIVE', activeStyle)
+
+    db.cmleaderstyle = 'ACTIVE'
+
+    const mleader = new AcDbMLeader()
+    const leaderIndex = mleader.addLeader()
+    mleader.addLeaderLine(leaderIndex, [
+      new AcGePoint3d(0, 0, 0),
+      new AcGePoint3d(5, 0, 0)
+    ])
+    db.tables.blockTable.modelSpace.appendEntity(mleader)
+
+    expect(mleader.mleaderStyleId).toBe(activeStyle.objectId)
+    expect(asAsciiDxf(db.dxfOut(undefined, 6))).toContain(
+      '9\n$CMLEADERSTYLE\n2\nACTIVE\n'
+    )
   })
 
   it('writes additional paper space layouts as BLOCK_RECORD, BLOCK, and LAYOUT objects', () => {
@@ -366,5 +471,148 @@ describe('AcDbDatabase.dxfOut', () => {
     expect(valuesByCode(tableRecord!, '302')).toEqual(['A1', 'A2', 'B1', 'B2'])
     expect(valuesByCode(tableRecord!, '140')).toEqual(['6', '6', '6', '6'])
     expect(valuesByCode(tableRecord!, '170')).toEqual(['1', '1', '1', '1'])
+  })
+
+  it('exports SOLID entities with type SOLID (dimension arrowheads)', () => {
+    const db = new AcDbDatabase()
+    db.createDefaultData()
+
+    const solid = new AcDbSolid()
+    solid.setPointAt(0, { x: 0, y: 0, z: 0 })
+    solid.setPointAt(1, { x: 1, y: 0, z: 0 })
+    solid.setPointAt(2, { x: 0.5, y: 2, z: 0 })
+    solid.setPointAt(3, { x: 0.5, y: 2, z: 0 })
+    db.tables.blockTable.modelSpace.appendEntity(solid)
+
+    const entities = parseRecords(getSection(db.dxfOut(undefined, 6), 'ENTITIES'))
+    const solidRecord = findRecord(entities, 'SOLID')
+    expect(solidRecord).toBeDefined()
+    expect(valuesByCode(solidRecord!, '100')).toContain('AcDbTrace')
+    expect(findRecord(entities, 'TRACE')).toBeUndefined()
+  })
+
+  it('exports CLASSES and correct ACAD_PROXY_ENTITY group codes', () => {
+    const db = new AcDbDatabase()
+    db.createDefaultData()
+    db.classes = [
+      {
+        name: 'TH_TOLERANCEENT',
+        cppClassName: 'TH_ToleranceEnt',
+        appName: 'PCCADDIM',
+        proxyFlag: 3071,
+        instanceCount: 1,
+        wasProxy: false,
+        isEntity: true
+      }
+    ]
+
+    const proxy = new AcDbProxyEntity()
+    proxy.proxyEntityClassId = 498
+    proxy.applicationEntityClassId = 500
+    proxy.objectDrawingFormat = 4128797
+    proxy.originalDataFormat = 0
+    proxy.setProxyGraphic(new Uint8Array([0x01, 0x02, 0x03, 0x04]))
+    db.tables.blockTable.modelSpace.appendEntity(proxy)
+
+    const dxf = asAsciiDxf(db.dxfOut(undefined, 6))
+    const headerIndex = dxf.indexOf('0\nSECTION\n2\nHEADER\n')
+    const classesIndex = dxf.indexOf('0\nSECTION\n2\nCLASSES\n')
+    const tablesIndex = dxf.indexOf('0\nSECTION\n2\nTABLES\n')
+    expect(classesIndex).toBeGreaterThan(headerIndex)
+    expect(tablesIndex).toBeGreaterThan(classesIndex)
+    expect(dxf).toContain('0\nCLASS\n1\nTH_TOLERANCEENT\n2\nTH_ToleranceEnt\n')
+
+    const entities = parseRecords(getSection(dxf, 'ENTITIES'))
+    const proxyRecord = findRecord(entities, 'ACAD_PROXY_ENTITY')
+    expect(proxyRecord).toBeDefined()
+    expect(valuesByCode(proxyRecord!, '90')).toContain('498')
+    expect(valuesByCode(proxyRecord!, '91')).toContain('500')
+    expect(valuesByCode(proxyRecord!, '95')).toContain('4128797')
+    expect(valuesByCode(proxyRecord!, '70')).toContain('0')
+    expect(valuesByCode(proxyRecord!, '160')).toContain('4')
+    expect(valuesByCode(proxyRecord!, '310')).toContain('01020304')
+    expect(valuesByCode(proxyRecord!, '1')).toEqual([])
+  })
+
+  it('re-opens its own dxfOut output: transparency header vars round-trip (440 bitfield)', async () => {
+    const db = new AcDbDatabase()
+    db.createDefaultData()
+    acdbHostApplicationServices().workingDatabase = db
+
+    // Non-default ByAlpha values so round-trip asserts more than method.
+    db.cetransparency.percentage = 30
+    db.hptransparency.percentage = 50
+    const ceSerialized = db.cetransparency.serialize()
+    const hpSerialized = db.hptransparency.serialize()
+
+    // AC1024+ writes $CETRANSPARENCY/$HPTRANSPARENCY as group-440 32-bit
+    // bitfield integers (high byte = method, low byte = alpha).
+    const dxf = asAsciiDxf(db.dxfOut(undefined, 6, 'AC1024'))
+    expect(dxf).toContain('$CETRANSPARENCY\n440\n')
+    expect(dxf).toContain('$HPTRANSPARENCY\n440\n')
+    expect(dxf).toContain(`$CETRANSPARENCY\n440\n${ceSerialized}\n`)
+    expect(dxf).toContain(`$HPTRANSPARENCY\n440\n${hpSerialized}\n`)
+
+    // The reader must accept its own writer's output: 440 values go through
+    // AcCmTransparency.deserialize. Feeding them to fromString as text used
+    // to reject bitfield ints > 255 with "Invalid transparency value!" and
+    // made every dxfOut-produced file unopenable.
+    const { AcDbDxfDocumentReader } = await import('../src/dxf/AcDbDxfDocumentReader')
+    const { AcDbDxfFiler } = await import('../src/base/AcDbDxfFiler')
+    const db2 = new AcDbDatabase()
+    db2.createDefaultData()
+    acdbHostApplicationServices().workingDatabase = db2
+    await expect(
+      new AcDbDxfDocumentReader(db2).read(AcDbDxfFiler.fromString(dxf))
+    ).resolves.toBeDefined()
+    expect(db2.cetransparency.equals(db.cetransparency)).toBe(true)
+    expect(db2.hptransparency.equals(db.hptransparency)).toBe(true)
+    expect(db2.cetransparency.serialize()).toBe(ceSerialized)
+    expect(db2.hptransparency.serialize()).toBe(hpSerialized)
+    expect(db2.cetransparency.percentage).toBe(30)
+    expect(db2.hptransparency.percentage).toBe(50)
+  })
+
+  it('reads textual transparency header values via fromString, not deserialize', async () => {
+    const { AcDbDxfDocumentReader } = await import('../src/dxf/AcDbDxfDocumentReader')
+    const { AcDbDxfFiler } = await import('../src/base/AcDbDxfFiler')
+    const db = new AcDbDatabase()
+    db.createDefaultData()
+    acdbHostApplicationServices().workingDatabase = db
+
+    // Non-440 string encoding: percentage must take fromString (ByAlpha ≈
+    // alpha 191 for 25%), not deserialize(25) which would be ByLayer|alpha 25.
+    const dxf = [
+      '0',
+      'SECTION',
+      '2',
+      'HEADER',
+      '9',
+      '$ACADVER',
+      '1',
+      'AC1024',
+      '9',
+      '$CETRANSPARENCY',
+      '1',
+      '25',
+      '9',
+      '$HPTRANSPARENCY',
+      '1',
+      'ByBlock',
+      '0',
+      'ENDSEC',
+      '0',
+      'SECTION',
+      '2',
+      'ENTITIES',
+      '0',
+      'ENDSEC',
+      '0',
+      'EOF'
+    ].join('\n')
+
+    await new AcDbDxfDocumentReader(db).read(AcDbDxfFiler.fromString(dxf))
+    expect(db.cetransparency.percentage).toBe(25)
+    expect(db.hptransparency.isByBlock).toBe(true)
   })
 })

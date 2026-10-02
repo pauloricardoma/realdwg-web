@@ -253,8 +253,84 @@ export class AcGeEllipseArc2d extends AcGeCurve2d {
    * @inheritdoc
    */
   transform(_matrix: AcGeMatrix2d) {
+    const matrix = _matrix
+    const transformedCenter2d = new AcGePoint2d(this.center).applyMatrix2d(
+      matrix
+    )
+    const transformedCenter = new AcGePoint3d(
+      transformedCenter2d.x,
+      transformedCenter2d.y,
+      this.center.z
+    )
+    const transformedMajorPoint = this.getPointAtAngle(0)
+      .clone()
+      .applyMatrix2d(matrix)
+    const transformedMinorPoint = this.getPointAtAngle(Math.PI / 2)
+      .clone()
+      .applyMatrix2d(matrix)
+
+    const majorVector = new AcGePoint2d(transformedMajorPoint).sub(
+      transformedCenter2d
+    )
+    const minorVector = new AcGePoint2d(transformedMinorPoint).sub(
+      transformedCenter2d
+    )
+
+    const majorAxisRadius = majorVector.length()
+    const minorAxisRadius = minorVector.length()
+    const rotation = Math.atan2(majorVector.y, majorVector.x)
+    const majorDirection = majorVector.clone().normalize()
+    const minorDirection = minorVector.clone().normalize()
+
+    const getAngle = (point: AcGePoint2d) => {
+      const relative = new AcGePoint2d(point).sub(transformedCenter2d)
+      const x = relative.dot(majorDirection)
+      const y = relative.dot(minorDirection)
+      return AcGeMathUtil.normalizeAngle(
+        Math.atan2(y / minorAxisRadius, x / majorAxisRadius)
+      )
+    }
+
+    const clockwise =
+      matrix.determinant() < 0 ? !this.clockwise : this.clockwise
+
+    const transformedEllipse = this.closed
+      ? new AcGeEllipseArc2d(
+          transformedCenter,
+          majorAxisRadius,
+          minorAxisRadius,
+          0,
+          TAU,
+          clockwise,
+          rotation
+        )
+      : new AcGeEllipseArc2d(
+          transformedCenter,
+          majorAxisRadius,
+          minorAxisRadius,
+          getAngle(this.startPoint.clone().applyMatrix2d(matrix)),
+          getAngle(this.endPoint.clone().applyMatrix2d(matrix)),
+          clockwise,
+          rotation
+        )
+
+    this.center = transformedEllipse.center
+    this.majorAxisRadius = transformedEllipse.majorAxisRadius
+    this.minorAxisRadius = transformedEllipse.minorAxisRadius
+    this._startAngle = transformedEllipse._startAngle
+    this._endAngle = transformedEllipse._endAngle
+    this._clockwise = transformedEllipse._clockwise
+    this.rotation = transformedEllipse.rotation
     this._boundingBoxNeedsUpdate = true
     return this
+  }
+
+  private getPointAtAngle(angle: number) {
+    return this.getPoint(
+      this.closed
+        ? angle / TAU
+        : AcGeMathUtil.normalizeAngle(angle - this.startAngle) / this.deltaAngle
+    )
   }
 
   /**
@@ -284,5 +360,143 @@ export class AcGeEllipseArc2d extends AcGeCurve2d {
       this.clockwise,
       this.rotation
     )
+  }
+
+  /**
+   * Returns the two focal points of this ellipse in WCS (XY).
+   *
+   * Returns an empty array when the ellipse is circular (major equals minor).
+   */
+  getFocusPoints(): AcGePoint2d[] {
+    const a = Math.max(this.majorAxisRadius, this.minorAxisRadius)
+    const b = Math.min(this.majorAxisRadius, this.minorAxisRadius)
+    if (a - b < 1e-9) {
+      return []
+    }
+    const c = Math.sqrt(a * a - b * b)
+    const cos = Math.cos(this.rotation)
+    const sin = Math.sin(this.rotation)
+    const isMajorPrimary = this.majorAxisRadius >= this.minorAxisRadius
+    const ux = isMajorPrimary ? cos : -sin
+    const uy = isMajorPrimary ? sin : cos
+    return [
+      new AcGePoint2d(this.center.x - c * ux, this.center.y - c * uy),
+      new AcGePoint2d(this.center.x + c * ux, this.center.y + c * uy)
+    ]
+  }
+
+  /**
+   * Returns quadrant snap points for a closed ellipse (axis crossings).
+   */
+  getQuadrantPoints(): AcGePoint2d[] {
+    if (!this.closed) {
+      return []
+    }
+    return [
+      this.getPoint(0),
+      this.getPoint(0.25),
+      this.getPoint(0.5),
+      this.getPoint(0.75)
+    ]
+  }
+
+  /**
+   * Returns the nearest point on this ellipse arc to the given point.
+   *
+   * Uses uniform sampling in curve parameter space; sufficient for object snap.
+   *
+   * @param point - Query point in WCS.
+   */
+  nearestPoint(point: AcGePointLike): AcGePoint2d {
+    const p = new AcGePoint2d(point.x, point.y)
+    let best = this.getPoint(0)
+    let bestDistSq = p.distanceToSquared(best)
+    const samples = 72
+    for (let i = 1; i <= samples; i++) {
+      const candidate = this.getPoint(i / samples)
+      const d = p.distanceToSquared(candidate)
+      if (d < bestDistSq) {
+        bestDistSq = d
+        best = candidate
+      }
+    }
+    return best
+  }
+
+  /**
+   * Returns tangent snap point(s) from the given point to this ellipse arc.
+   */
+  tangentPoints(point: AcGePointLike): AcGePoint2d[] {
+    const localP = this._projectPointToLocal(point)
+    const angles = this._findSnapAngles(localP, (qx, qy, cos, sin) => {
+      const tx = -this.majorAxisRadius * sin
+      const ty = this.minorAxisRadius * cos
+      return (qx - localP.x) * ty - (qy - localP.y) * tx
+    })
+    return angles.map(angle => this.getPointAtAngle(angle))
+  }
+
+  /**
+   * Returns perpendicular snap point(s) on this ellipse arc from the given point.
+   */
+  perpendicularPoints(point: AcGePointLike): AcGePoint2d[] {
+    const localP = this._projectPointToLocal(point)
+    const angles = this._findSnapAngles(localP, (qx, qy, cos, sin) => {
+      const nx = this.minorAxisRadius * cos
+      const ny = this.majorAxisRadius * sin
+      return (qx - localP.x) * ny - (qy - localP.y) * nx
+    })
+    return angles.map(angle => this.getPointAtAngle(angle))
+  }
+
+  private _projectPointToLocal(point: AcGePointLike): { x: number; y: number } {
+    const dx = point.x - this.center.x
+    const dy = point.y - this.center.y
+    const cos = Math.cos(-this.rotation)
+    const sin = Math.sin(-this.rotation)
+    return {
+      x: dx * cos - dy * sin,
+      y: dx * sin + dy * cos
+    }
+  }
+
+  private _findSnapAngles(
+    _localP: { x: number; y: number },
+    errorAt: (qx: number, qy: number, cos: number, sin: number) => number,
+    samples = 144
+  ): number[] {
+    const a = this.majorAxisRadius
+    const b = this.minorAxisRadius
+    const start = this.startAngle
+    const delta = this.deltaAngle
+    const angles: number[] = []
+
+    const evalError = (theta: number) => {
+      const cos = Math.cos(theta)
+      const sin = Math.sin(theta)
+      return errorAt(a * cos, b * sin, cos, sin)
+    }
+
+    let prevT = start
+    let prevE = evalError(prevT)
+    for (let i = 1; i <= samples; i++) {
+      const t = start + (delta * i) / samples
+      const e = evalError(t)
+      if (Math.abs(prevE) < 1e-10) angles.push(prevT)
+      if (prevE * e < 0) {
+        let lo = prevT
+        let hi = t
+        for (let j = 0; j < 32; j++) {
+          const mid = (lo + hi) / 2
+          if (evalError(lo) * evalError(mid) <= 0) hi = mid
+          else lo = mid
+        }
+        angles.push((lo + hi) / 2)
+      }
+      prevT = t
+      prevE = e
+    }
+
+    return angles
   }
 }

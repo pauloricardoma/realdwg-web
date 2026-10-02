@@ -1,10 +1,11 @@
 import {
-  AcGeBox3d,
+  AcGeMatrix3d,
   AcGePoint3d,
   AcGePoint3dLike
 } from '@mlightcad/geometry-engine'
 
 import { AcDbDxfFiler } from '../../base'
+import { AcDbEntityProperties } from '../AcDbEntityProperties'
 import { AcDbDimension } from './AcDbDimension'
 
 /**
@@ -87,6 +88,44 @@ export class AcDbOrdinateDimension extends AcDbDimension {
     this._leaderEndPoint.copy(value)
   }
 
+  override get properties(): AcDbEntityProperties {
+    const baseProperties = this.getBaseProperties()
+    return {
+      type: this.type,
+      groups: [
+        ...baseProperties.groups,
+        {
+          groupName: 'geometry',
+          properties: [
+            ...this.createPoint3dProperties(
+              'definingPoint',
+              () => this.definingPoint
+            ),
+            ...this.createPoint3dProperties(
+              'leaderEndPoint',
+              () => this.leaderEndPoint
+            )
+          ]
+        }
+      ]
+    }
+  }
+
+  /**
+   * @inheritdoc
+   */
+  protected override collectDimensionDefinitionGripPoints() {
+    return [this.definingPoint, this.leaderEndPoint]
+  }
+
+  /**
+   * @inheritdoc
+   */
+  protected override subTransformBy(matrix: AcGeMatrix3d) {
+    this._definingPoint.applyMatrix4(matrix)
+    this._leaderEndPoint.applyMatrix4(matrix)
+  }
+
   /**
    * Gets the geometric extents (bounding box) of this dimension entity.
    *
@@ -97,8 +136,10 @@ export class AcDbOrdinateDimension extends AcDbDimension {
    * @inheritdoc
    */
   get geometricExtents() {
-    // TODO: Finish it
-    return new AcGeBox3d()
+    return this.getGeometricExtentsFromDimBlockOrPoints([
+      this.definingPoint,
+      this.leaderEndPoint
+    ])
   }
 
   /**
@@ -125,6 +166,55 @@ export class AcDbOrdinateDimension extends AcDbDimension {
     filer.writeSubclassMarker('AcDbOrdinateDimension')
     filer.writePoint3d(13, this.definingPoint)
     filer.writePoint3d(14, this.leaderEndPoint)
+    return this
+  }
+
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    filer.atSubclassData('AcDbOrdinateDimension')
+
+    let dx = this.definingPoint.x
+    let dy = this.definingPoint.y
+    let dz = this.definingPoint.z
+    let lx = this.leaderEndPoint.x
+    let ly = this.leaderEndPoint.y
+    let lz = this.leaderEndPoint.z
+
+    const commit = () => {
+      this.definingPoint = new AcGePoint3d(dx, dy, dz)
+      this.leaderEndPoint = new AcGePoint3d(lx, ly, lz)
+    }
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      const n = Number(item.value)
+      switch (code) {
+        case 13:
+          dx = n
+          break
+        case 23:
+          dy = n
+          break
+        case 33:
+          dz = n
+          break
+        case 14:
+          lx = n
+          break
+        case 24:
+          ly = n
+          break
+        case 34:
+          lz = n
+          break
+        default:
+          break
+      }
+    }
+
+    commit()
     return this
   }
 }

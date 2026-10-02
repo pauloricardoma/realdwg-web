@@ -1,5 +1,8 @@
 import {
+  AcGeBox3d,
+  AcGeIntersectPrimitive,
   AcGeLine3d,
+  AcGeMathUtil,
   AcGeMatrix3d,
   AcGePoint2dLike,
   AcGePoint3d,
@@ -10,7 +13,7 @@ import {
 import {
   AcGiArrowStyle,
   AcGiArrowType,
-  AcGiLineArrowStyle,
+  AcGiMTextAttachmentPoint,
   AcGiRenderer
 } from '@mlightcad/graphic-interface'
 
@@ -18,8 +21,17 @@ import { AcDbObjectId } from '../../base'
 import { AcDbDxfFiler } from '../../base'
 import { AcDbDimStyleTableRecord } from '../../database'
 import { AcDbRenderingCache } from '../../misc'
+import { AcDbOsnapMode } from '../../misc'
+import { AcDbBlockReference } from '../AcDbBlockReference'
 import { AcDbEntity } from '../AcDbEntity'
-import { AcDbLine } from '../AcDbLine'
+import {
+  AcDbEntityProperties,
+  AcDbEntityPropertyGroup,
+  AcDbEntityPropertyType,
+  AcDbEntityRuntimeProperty
+} from '../AcDbEntityProperties'
+import { acdbForEachGripIndex } from '../AcDbGripHelpers'
+import { acdbTransformIntersectPrimitives } from '../AcDbIntersectHelpers'
 
 /**
  * Defines the line spacing style for dimension text.
@@ -61,6 +73,14 @@ export abstract class AcDbDimension extends AcDbEntity {
   private _dimBlockId: string | null
   /** The relative position point of the block referenced by the dimension (in WCS coordinates). */
   private _dimBlockPosition: AcGePoint3d
+  /**
+   * DXF group code 10 definition point captured during {@link dxfInFields}.
+   *
+   * This is **not** {@link dimBlockPosition} (DXF group 12). Subclasses use it
+   * as the dim-line / center / far-chord point when their typed point codes are
+   * absent (matching AutoCAD DXF and dxf-json-converter).
+   */
+  protected _dxfDefinitionPoint: AcGePoint3d
   /** The dimension style name used by this dimension */
   private _dimensionStyleName: string | null
   /** The user-supplied dimension annotation text */
@@ -75,10 +95,31 @@ export abstract class AcDbDimension extends AcDbEntity {
   private _textPosition: AcGePoint3d
   /** The rotation angle of the dimension text */
   private _textRotation: number
+  /**
+   * Horizontal direction for the dimension entity (DXF group 51), in radians.
+   * Negative of the angle between the OCS X axis and the UCS X axis.
+   */
+  private _horizontalRotation: number
+  /**
+   * Dimension type flags (DXF group 70). Low bits select the dimension kind;
+   * bit 32 marks user-defined text position, etc.
+   */
+  private _dimensionType: number
+  /** Dimension text attachment point (DXF group 71). */
+  private _attachmentPoint: AcGiMTextAttachmentPoint
+  /** DXF class version (group 280); 0 = R2010+. */
+  private _dxfVersion: number
   /** The cached dimension style record */
   private _dimStyle?: AcDbDimStyleTableRecord
   /** The normal vector of the plane containing the block reference */
   private _normal: AcGeVector3d
+  /**
+   * Additional rotation (radians) applied when placing the anonymous dimension
+   * block. Block geometry is authored at a fixed orientation; this accumulates
+   * rigid-body rotations from {@link transformBy} so the block rotates with the
+   * dimension definition points.
+   */
+  private _dimBlockRotation: number
 
   /**
    * Creates a new dimension entity.
@@ -97,13 +138,19 @@ export abstract class AcDbDimension extends AcDbEntity {
     super()
     this._dimBlockId = null
     this._dimBlockPosition = new AcGePoint3d()
+    this._dxfDefinitionPoint = new AcGePoint3d()
     this._dimensionStyleName = null
     this._dimensionText = null
     this._textLineSpacingFactor = 1.0
     this._textLineSpacingStyle = AcDbLineSpacingStyle.AtLeast
     this._textPosition = new AcGePoint3d()
     this._textRotation = 0
+    this._horizontalRotation = 0
+    this._dimensionType = 0
+    this._attachmentPoint = AcGiMTextAttachmentPoint.MiddleCenter
+    this._dxfVersion = 0
     this._normal = new AcGeVector3d(0, 0, 1)
+    this._dimBlockRotation = 0
   }
 
   /**
@@ -212,6 +259,7 @@ export abstract class AcDbDimension extends AcDbEntity {
    */
   set dimensionStyleName(value: string | null) {
     this._dimensionStyleName = value
+    this._dimStyle = undefined
   }
 
   /**
@@ -322,6 +370,52 @@ export abstract class AcDbDimension extends AcDbEntity {
   }
 
   /**
+   * Horizontal direction for the dimension entity (DXF group 51), in radians.
+   *
+   * Per the AutoCAD DXF reference this is the negative of the angle between
+   * the OCS X axis and the UCS X axis, always in the OCS XY plane.
+   */
+  get horizontalRotation() {
+    return this._horizontalRotation
+  }
+  set horizontalRotation(value: number) {
+    this._horizontalRotation = value
+  }
+
+  /**
+   * Dimension type flags from DXF group 70.
+   *
+   * Bits 0–3 encode the dimension kind; bit 5 (32) indicates the text was
+   * placed at a user-defined location.
+   */
+  get dimensionType() {
+    return this._dimensionType
+  }
+  set dimensionType(value: number) {
+    this._dimensionType = value
+  }
+
+  /**
+   * Attachment point of the dimension text (DXF group 71).
+   */
+  get attachmentPoint() {
+    return this._attachmentPoint
+  }
+  set attachmentPoint(value: AcGiMTextAttachmentPoint) {
+    this._attachmentPoint = value
+  }
+
+  /**
+   * DXF class version (group 280). `0` means R2010+.
+   */
+  get dxfVersion() {
+    return this._dxfVersion
+  }
+  set dxfVersion(value: number) {
+    this._dxfVersion = value
+  }
+
+  /**
    * Gets the normal vector of the plane containing the dimension.
    *
    * @returns The normal vector
@@ -339,30 +433,388 @@ export abstract class AcDbDimension extends AcDbEntity {
     this._normal.copy(value).normalize()
   }
 
+  override get properties(): AcDbEntityProperties {
+    return this.getBaseProperties()
+  }
+
+  protected getBaseProperties(): AcDbEntityProperties {
+    return {
+      type: this.type,
+      groups: [this.getGeneralProperties(), this.getDimensionProperties()]
+    }
+  }
+
+  /**
+   * Transforms this dimension by the specified matrix.
+   */
+  transformBy(matrix: AcGeMatrix3d): this {
+    const origin = this._textPosition.clone()
+    const rotationPoint = this._textPosition
+      .clone()
+      .add(
+        new AcGeVector3d(
+          Math.cos(this._textRotation),
+          Math.sin(this._textRotation),
+          0
+        )
+      )
+
+    this._dimBlockPosition.applyMatrix4(matrix)
+    this._textPosition.applyMatrix4(matrix)
+    this._normal.transformDirection(matrix)
+
+    const dimBlockRotationAxis = new AcGeVector3d(1, 0, 0).transformDirection(
+      matrix
+    )
+    if (dimBlockRotationAxis.lengthSq() > 0) {
+      this._dimBlockRotation += Math.atan2(
+        dimBlockRotationAxis.y,
+        dimBlockRotationAxis.x
+      )
+    }
+
+    origin.applyMatrix4(matrix)
+    rotationPoint.applyMatrix4(matrix)
+    const rotationVector = new AcGeVector3d(rotationPoint).sub(origin)
+    if (rotationVector.lengthSq() > 0) {
+      this._textRotation = Math.atan2(rotationVector.y, rotationVector.x)
+    }
+
+    this.subTransformBy(matrix)
+    return this
+  }
+
+  /**
+   * Resolves osnap points through the anonymous dimension block.
+   *
+   * Dimensions are rendered from `dimBlockId` contents, so osnap queries need
+   * to delegate to the block entities and map points between block-local space
+   * and WCS.
+   */
+  override subGetOsnapPoints(
+    osnapMode: AcDbOsnapMode,
+    pickPoint: AcGePoint3dLike,
+    lastPoint: AcGePoint3dLike,
+    snapPoints: AcGePoint3dLike[],
+    gsMark?: AcDbObjectId
+  ) {
+    const blockTableRecord = this.getDimBlockTableRecord()
+    if (!blockTableRecord) return
+
+    const blockTransform = this.getFullDimBlockTransform()
+    const localPickPoint = new AcGePoint3d(pickPoint).applyMatrix4(
+      blockTransform.clone().invert()
+    )
+    const localLastPoint = new AcGePoint3d(lastPoint).applyMatrix4(
+      blockTransform.clone().invert()
+    )
+
+    const appendEntitySnapPoints = (
+      entity: AcDbEntity,
+      subEntityId?: AcDbObjectId
+    ) => {
+      const localSnapPoints: AcGePoint3d[] = []
+      entity.subGetOsnapPoints(
+        osnapMode,
+        localPickPoint,
+        localLastPoint,
+        localSnapPoints,
+        subEntityId,
+        blockTransform
+      )
+
+      if (entity instanceof AcDbBlockReference) {
+        localSnapPoints.forEach(point => snapPoints.push(point.clone()))
+      } else {
+        localSnapPoints.forEach(point =>
+          snapPoints.push(new AcGePoint3d(point).applyMatrix4(blockTransform))
+        )
+      }
+    }
+
+    if (gsMark) {
+      const target = blockTableRecord.getIdAt(gsMark)
+      if (target) {
+        appendEntitySnapPoints(target, gsMark)
+        if (snapPoints.length > 0) return
+      }
+    }
+
+    for (const entity of blockTableRecord.newIterator()) {
+      appendEntitySnapPoints(entity)
+    }
+  }
+
   /**
    * @inheritdoc
    */
   subWorldDraw(renderer: AcGiRenderer) {
-    if (this.dimBlockId) {
-      const blockTableRecord = this.database.tables.blockTable.getAt(
-        this.dimBlockId
+    const blockTableRecord = this.getDimBlockTableRecord()
+    if (blockTableRecord) {
+      const matrix = this.computeDimBlockTransform()
+      const group = AcDbRenderingCache.instance.draw(
+        renderer,
+        blockTableRecord,
+        this.resolvedColor,
+        [],
+        false,
+        matrix,
+        this._normal
       )
-      if (blockTableRecord) {
-        const matrix = this.computeDimBlockTransform()
-        const group = AcDbRenderingCache.instance.draw(
-          renderer,
-          blockTableRecord,
-          this.rgbColor,
-          [],
-          false,
-          matrix,
-          this._normal
-        )
-        return group
-      }
+      return group
     }
     const group = renderer.group([])
     return group
+  }
+
+  /** @inheritdoc */
+  override subGetIntersectCurves(): AcGeIntersectPrimitive[] {
+    const blockTableRecord = this.getDimBlockTableRecord()
+    if (!blockTableRecord) return []
+    const matrix = this.getFullDimBlockTransform()
+    const primitives: AcGeIntersectPrimitive[] = []
+    for (const entity of blockTableRecord.newIterator()) {
+      primitives.push(
+        ...acdbTransformIntersectPrimitives(
+          entity.subGetIntersectCurves(),
+          matrix
+        )
+      )
+    }
+    return primitives
+  }
+
+  /**
+   * Computes transformed geometric extents from the anonymous dimension block.
+   */
+  protected getDimBlockGeometricExtents(): AcGeBox3d {
+    const box = new AcGeBox3d()
+    const blockTableRecord = this.getDimBlockTableRecord()
+    if (!blockTableRecord) return box
+
+    for (const entity of blockTableRecord.newIterator()) {
+      box.union(entity.geometricExtents)
+    }
+
+    box.applyMatrix4(this.getFullDimBlockTransform())
+    return box
+  }
+
+  /**
+   * Builds geometric extents from a dimension block when present, otherwise from
+   * the supplied WCS definition points and user-placed text position.
+   */
+  protected getGeometricExtentsFromDimBlockOrPoints(
+    points: AcGePoint3dLike[]
+  ): AcGeBox3d {
+    const blockExtents = this.getDimBlockGeometricExtents()
+    if (!blockExtents.isEmpty()) {
+      return blockExtents
+    }
+
+    const box = new AcGeBox3d()
+    for (const point of points) {
+      box.expandByPoint(point)
+    }
+    if (this.hasExplicitTextPosition()) {
+      box.expandByPoint(this.textPosition)
+    }
+    return box
+  }
+
+  /**
+   * Returns true when dimension text has been placed away from the default origin.
+   */
+  private hasExplicitTextPosition(): boolean {
+    const { x, y, z } = this.textPosition
+    return x !== 0 || y !== 0 || z !== 0
+  }
+
+  /**
+   * Collects dimension-specific definition grip points in WCS coordinates.
+   *
+   * Subclasses override this to expose their editable definition points,
+   * matching AutoCAD `AcDbDimension::getGripPoints` behavior.
+   */
+  protected collectDimensionDefinitionGripPoints(): AcGePoint3d[] {
+    return []
+  }
+
+  /**
+   * Gets the grip points for this dimension.
+   *
+   * Returns definition points together with the dimension text position.
+   *
+   * @returns Array of grip points as 3D points
+   */
+  subGetGripPoints() {
+    return this.collectDimensionDefinitionGripPoints().concat([
+      this.textPosition
+    ])
+  }
+
+  /**
+   * Moves dimension definition and text grip points by the given offset.
+   */
+  subMoveGripPointsAt(indices: number[], offset: AcGeVector3dLike) {
+    const definitionPoints = this.collectDimensionDefinitionGripPoints()
+    acdbForEachGripIndex(indices, index => {
+      if (index >= 0 && index < definitionPoints.length) {
+        definitionPoints[index].add(offset)
+      } else if (index === definitionPoints.length) {
+        this.textPosition.add(offset)
+      }
+    })
+    return this
+  }
+
+  /**
+   * Looks up the anonymous block referenced by `dimBlockId`.
+   */
+  protected getDimBlockTableRecord() {
+    return this.dimBlockId
+      ? this.database.tables.blockTable.getAt(this.dimBlockId)
+      : undefined
+  }
+
+  protected getDimensionProperties(): AcDbEntityPropertyGroup {
+    return {
+      groupName: 'dimension',
+      properties: [
+        this.createProperty(
+          'dimensionStyleName',
+          'string',
+          () => this.dimensionStyleName ?? '',
+          (value: string) => {
+            this.dimensionStyleName = value.trim() === '' ? null : value
+          }
+        ),
+        this.createProperty(
+          'dimensionText',
+          'string',
+          () => this.dimensionText ?? '',
+          (value: string) => {
+            this.dimensionText = value
+          }
+        ),
+        this.createProperty('measurement', 'float', () =>
+          this.getMeasurementPropertyValue()
+        ),
+        this.createProperty(
+          'dimBlockId',
+          'string',
+          () => this.dimBlockId ?? ''
+        ),
+        ...this.createPoint3dProperties(
+          'dimBlockPosition',
+          () => this.dimBlockPosition
+        ),
+        ...this.createPoint3dProperties(
+          'textPosition',
+          () => this.textPosition
+        ),
+        this.createProperty(
+          'textRotation',
+          'float',
+          () => this.textRotation,
+          (value: number) => {
+            this.textRotation = value
+          }
+        ),
+        this.createProperty(
+          'textLineSpacingFactor',
+          'float',
+          () => this.textLineSpacingFactor,
+          (value: number) => {
+            this.textLineSpacingFactor = value
+          }
+        ),
+        this.createProperty(
+          'textLineSpacingStyle',
+          'enum',
+          () => this.textLineSpacingStyle,
+          (value: AcDbLineSpacingStyle) => {
+            this.textLineSpacingStyle = value
+          },
+          [
+            {
+              label: AcDbLineSpacingStyle[AcDbLineSpacingStyle.AtLeast],
+              value: AcDbLineSpacingStyle.AtLeast
+            },
+            {
+              label: AcDbLineSpacingStyle[AcDbLineSpacingStyle.Exactly],
+              value: AcDbLineSpacingStyle.Exactly
+            }
+          ]
+        ),
+        ...this.createPoint3dProperties('normal', () => this.normal)
+      ]
+    }
+  }
+
+  protected createProperty<T>(
+    name: string,
+    type: AcDbEntityPropertyType,
+    get: () => T,
+    set?: (value: T) => void,
+    options?: { label: string; value: unknown }[]
+  ): AcDbEntityRuntimeProperty<T> {
+    return {
+      name,
+      type,
+      editable: set != null,
+      options,
+      accessor: set ? { get, set } : { get }
+    }
+  }
+
+  protected createPoint3dProperties(
+    prefix: string,
+    getPoint: () => AcGePoint3d
+  ): AcDbEntityRuntimeProperty<number>[] {
+    return [
+      this.createProperty(
+        `${prefix}X`,
+        'float',
+        () => getPoint().x,
+        (value: number) => {
+          getPoint().x = value
+        }
+      ),
+      this.createProperty(
+        `${prefix}Y`,
+        'float',
+        () => getPoint().y,
+        (value: number) => {
+          getPoint().y = value
+        }
+      ),
+      this.createProperty(
+        `${prefix}Z`,
+        'float',
+        () => getPoint().z,
+        (value: number) => {
+          getPoint().z = value
+        }
+      )
+    ]
+  }
+
+  protected getMeasurementPropertyValue(): number | undefined {
+    return this.measurement
+  }
+
+  /**
+   * Builds the complete dimension-block transform (OCS transform + extrusion).
+   */
+  protected getFullDimBlockTransform() {
+    const dimBlockTransform = this.computeDimBlockTransform()
+    if (this._normal.x === 0 && this._normal.y === 0 && this._normal.z === 1) {
+      return dimBlockTransform
+    }
+
+    const extrusion = new AcGeMatrix3d().setFromExtrusionDirection(this._normal)
+    return new AcGeMatrix3d().multiplyMatrices(extrusion, dimBlockTransform)
   }
 
   protected get arrowScaleFactor() {
@@ -446,17 +898,6 @@ export abstract class AcDbDimension extends AcDbEntity {
   }
 
   /**
-   * Get line arrow style of the specified line according to its type (extension line or dimension
-   * line). Return undefined if no line arrow style applied.
-   * @param line Input line to get its line style
-   * @returns Return the line style of the specified line. Return undefined if no line arrow style applied.
-   */
-  // @ts-expect-error not use '_' prefix so that typedoc can the correct parameter to generate doc
-  protected getLineArrowStyle(line: AcDbLine): AcGiLineArrowStyle | undefined {
-    return undefined
-  }
-
-  /**
    * Find the point `p3` on a line along the line direction at a distance `length` from `p2`.
    *
    * @param p1 - The start point of the line.
@@ -528,11 +969,11 @@ export abstract class AcDbDimension extends AcDbEntity {
    *
    * In AutoCAD, each dimension references an **anonymous block** that contains
    * the graphical representation of the dimension (dimension line, extension
-   * lines, arrows, and text). That block is defined in the **dimension’s Object
+   * lines, arrows, and text). That block is defined in the **dimension?? Object
    * Coordinate System (OCS)**.
    *
    * This method computes the transformation that positions the anonymous
-   * dimension block **within the dimension’s OCS**, excluding any extrusion
+   * dimension block **within the dimension?? OCS**, excluding any extrusion
    * (normal) transformation.
    *
    * Conceptually, AutoCAD applies the following steps when displaying a
@@ -544,7 +985,7 @@ export abstract class AcDbDimension extends AcDbEntity {
    *
    * This method implements **steps 1 and 2 only**.
    *
-   * The OCS → WCS transformation derived from {@link normal} is **intentionally
+   * The OCS ??WCS transformation derived from {@link normal} is **intentionally
    * excluded** and must be applied **after rendering** (see
    * {@link AcDbRenderingCache.draw}). This matches AutoCAD / RealDWG behavior and
    * ensures:
@@ -558,15 +999,16 @@ export abstract class AcDbDimension extends AcDbEntity {
    * ```
    * dimBlockTransform =
    *   T(dimBlockPosition)
-   * · T(-blockBasePoint)
+   * ? R(dimBlockRotation)
+   * ? T(-blockBasePoint)
    * ```
    *
    * ### Notes
    *
    * - The returned matrix operates entirely in dimension OCS
-   * - No scaling or rotation is applied here
+   * - {@link transformBy} accumulates extra block rotation so cached anonymous
+   *   block geometry rotates with the dimension definition points
    * - {@link normal} is applied later as a final orientation step
-   * - This mirrors the internal behavior of `AcDbDimension` in ObjectARX
    *
    * @returns A transformation matrix that positions the anonymous dimension
    *          block in OCS space, excluding extrusion.
@@ -603,19 +1045,30 @@ export abstract class AcDbDimension extends AcDbEntity {
       this._dimBlockPosition.z
     )
 
+    const mRot = new AcGeMatrix3d().makeRotationZ(this._dimBlockRotation)
+
     // ------------------------------------------------------------
     // Final matrix (OCS space only):
     //
     // dimBlockTransform =
     //   T(dimBlockPosition)
-    // · T(-blockBasePoint)
+    // ? R(dimBlockRotation)
+    // ? T(-blockBasePoint)
     //
     // NOTE:
     // - This matrix operates entirely in dimension OCS
     // - The extrusion / normal is intentionally excluded
     // ------------------------------------------------------------
-    return new AcGeMatrix3d().multiplyMatrices(mInsert, mBase)
+    return new AcGeMatrix3d().multiplyMatrices(
+      mInsert,
+      new AcGeMatrix3d().multiplyMatrices(mRot, mBase)
+    )
   }
+
+  /**
+   * Subclasses can override this to transform their own definition points.
+   */
+  protected subTransformBy(_matrix: AcGeMatrix3d) {}
 
   /**
    * Writes DXF fields for this object.
@@ -630,14 +1083,130 @@ export abstract class AcDbDimension extends AcDbEntity {
         ? this.database.tables.dimStyleTable.getAt(this.dimensionStyleName)
         : undefined
     filer.writeSubclassMarker('AcDbDimension')
+    filer.writeInt16(280, this.dxfVersion)
+    filer.writeString(2, this.dimBlockId ?? undefined)
     filer.writeString(3, this.dimensionStyleName ?? this.dimensionStyle.name)
-    filer.writePoint3d(10, this.dimBlockPosition)
+    filer.writePoint3d(10, this._dxfDefinitionPoint)
     filer.writeString(1, this.dimensionText ?? '')
     filer.writeAngle(53, this.textRotation)
+    if (this.horizontalRotation !== 0) {
+      filer.writeAngle(51, this.horizontalRotation)
+    }
     filer.writePoint3d(11, this.textPosition)
-    filer.writeInt16(70, 0)
+    filer.writeInt16(70, this.dimensionType)
+    filer.writeInt16(71, this.attachmentPoint)
+    filer.writeInt16(72, this.textLineSpacingStyle)
+    filer.writeDouble(41, this.textLineSpacingFactor)
+    filer.writeDouble(42, this.measurement)
     filer.writeVector3d(210, this.normal)
     filer.writeObjectId(340, dimStyle?.objectId)
+    return this
+  }
+
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    // Tolerate missing AcDbDimension marker.
+    filer.atSubclassData('AcDbDimension')
+
+    // Group 10 is the definition point — NOT dimBlockPosition (group 12).
+    // Leaving dimBlockPosition at (0,0,0) unless a subclass sees group 12
+    // matches dxf-json-converter and avoids double-offsetting *D* blocks.
+    let dx = this._dxfDefinitionPoint.x
+    let dy = this._dxfDefinitionPoint.y
+    let dz = this._dxfDefinitionPoint.z
+    let tx = this.textPosition.x
+    let ty = this.textPosition.y
+    let tz = this.textPosition.z
+    let textRotDeg = (this.textRotation * 180) / Math.PI
+    let nx = this.normal.x
+    let ny = this.normal.y
+    let nz = this.normal.z
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      const n = Number(item.value)
+      if (code === 100) {
+        // Next dimension subclass (AcDbAlignedDimension, …).
+        filer.pushBackItem(item)
+        break
+      }
+      switch (code) {
+        case 1:
+          this.dimensionText = String(item.value)
+          break
+        case 2:
+          this.dimBlockId = String(item.value)
+          break
+        case 3:
+          this.dimensionStyleName = String(item.value)
+          break
+        case 10:
+          dx = n
+          break
+        case 20:
+          dy = n
+          break
+        case 30:
+          dz = n
+          break
+        case 11:
+          tx = n
+          break
+        case 21:
+          ty = n
+          break
+        case 31:
+          tz = n
+          break
+        case 41:
+          this.textLineSpacingFactor = n
+          break
+        case 42:
+          this.measurement = n
+          break
+        case 53:
+          textRotDeg = n
+          break
+        case 51:
+          this.horizontalRotation = AcGeMathUtil.degToRad(n)
+          break
+        case 70:
+          this.dimensionType = n
+          break
+        case 71:
+          this.attachmentPoint = n as AcGiMTextAttachmentPoint
+          break
+        case 72:
+          this.textLineSpacingStyle = n as AcDbLineSpacingStyle
+          break
+        case 210:
+          nx = n
+          break
+        case 220:
+          ny = n
+          break
+        case 230:
+          nz = n
+          break
+        case 280:
+          this.dxfVersion = n
+          break
+        case 340:
+          // Dimstyle hard pointer — style is resolved via name (group 3).
+          break
+        default:
+          // Dimstyle overrides and other optional codes may appear here.
+          // Keep scanning so the typed subclass marker (100) is still reached.
+          break
+      }
+    }
+
+    this._dxfDefinitionPoint.set(dx, dy, dz)
+    this.textPosition.copy(new AcGePoint3d(tx, ty, tz))
+    this.textRotation = (textRotDeg * Math.PI) / 180
+    this.normal.copy(new AcGeVector3d(nx, ny, nz))
     return this
   }
 }

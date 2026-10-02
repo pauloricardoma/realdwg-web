@@ -4,6 +4,7 @@ import {
   AcDbBlockScaling,
   AcDbBlockTableRecord,
   AcDbConversionProgressCallback,
+  acdbCreateWorkerApi,
   AcDbDatabase,
   AcDbDatabaseConverter,
   AcDbDatabaseConverterConfig,
@@ -15,34 +16,44 @@ import {
   AcDbDimZeroSuppression,
   AcDbDimZeroSuppressionAngular,
   AcDbEntity,
+  acdbHexStringsToBytes,
+  acdbImportDynBlockMetadata,
+  AcDbLayerFilterPersistSource,
   AcDbLayerTableRecord,
   AcDbLayout,
   AcDbLinetypeTableRecord,
+  AcDbLinetypeTableRecordAttrs,
+  acdbNormalizeExtensionDictionaryId,
   AcDbObject,
+  AcDbOpenDatabaseError,
   AcDbParsingTaskResult,
   AcDbRasterImageDef,
+  acdbReadLayerFilterTree,
   AcDbSymbolTableRecord,
   AcDbTextStyleTableRecord,
+  AcDbTextStyleTableRecordAttrs,
   AcDbViewportTableRecord,
-  AcGiBaseLineStyle,
   AcGiDefaultLightingType,
   AcGiOrthographicType,
   AcGiRenderMode,
-  createWorkerApi,
-  DEFAULT_TEXT_STYLE
+  ByLayer,
+  DEFAULT_MLEADER_STYLE,
+  DEFAULT_TEXT_STYLE,
+  VPORT_FALLBACK_CENTER_2D,
+  VPORT_FALLBACK_LLC,
+  VPORT_FALLBACK_URC,
+  VPORT_FALLBACK_VIEW_DIR,
+  VPORT_FALLBACK_VIEW_TARGET
 } from '@mlightcad/data-model'
 import {
-  DwgBlockRecordTableEntry,
   DwgCommonObject,
   DwgCommonTableEntry,
   DwgDatabase,
-  DwgEntity,
-  DwgInsertEntity,
-  DwgMTextEntity,
-  DwgTextEntity
+  DwgEntity
 } from '@mlightcad/libredwg-web'
 
 import { AcDbEntityConverter } from './AcDbEntitiyConverter'
+import { AcDbObjectConverter } from './AcDbObjectConverter'
 
 const MODEL_SPACE = '*MODEL_SPACE'
 
@@ -52,9 +63,9 @@ const MODEL_SPACE = '*MODEL_SPACE'
 export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
   constructor(config: AcDbDatabaseConverterConfig = {}) {
     super(config)
-    config.useWorker = true
-    if (!config.parserWorkerUrl) {
-      config.parserWorkerUrl = '/assets/libredwg-parser-worker.js'
+    this.config.useWorker = true
+    if (!this.config.parserWorkerUrl) {
+      this.config.parserWorkerUrl = '/assets/libredwg-parser-worker.js'
     }
   }
 
@@ -63,7 +74,7 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
     const resolvedTimeout = this.getParserWorkerTimeout(data, timeout)
 
     if (effectiveConfig.useWorker && effectiveConfig.parserWorkerUrl) {
-      const api = createWorkerApi({
+      const api = acdbCreateWorkerApi({
         workerUrl: effectiveConfig.parserWorkerUrl,
         timeout: resolvedTimeout,
         // One concurrent worker needed for parser
@@ -75,100 +86,25 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
       >(data)
       // Release worker
       api.destroy()
-      if (result.success) {
-        return result.data!
-      } else {
-        throw new Error(
-          `Failed to parse drawing due to error: '${result.error}'`
-        )
-      }
+      AcDbOpenDatabaseError.throwOnWorkerParseFailure(result)
+      return result.data!
     } else {
       throw new Error('dwg converter can run in web worker only!')
     }
   }
 
-  /**
-   * Gets all of fonts used by entities in model space and paper space
-   * @param dwg dwg database model
-   * @returns Returns all of fonts used by entities in model space and paper space
-   */
-  protected getFonts(dwg: DwgDatabase) {
-    // Build block map. The key is block name.
-    const blockMap: Map<string, DwgBlockRecordTableEntry> = new Map()
-    dwg.tables.BLOCK_RECORD.entries.forEach(btr => {
-      blockMap.set(btr.name, btr)
-    })
-
-    // Build text style map. The key is text style name, and the value is font name list.
-    const styleMap = new Map<string, string[]>()
-    const getFontName = (fontFileName: string) => {
-      if (fontFileName) {
-        const lastDotIndex = fontFileName.lastIndexOf('.')
-        if (lastDotIndex >= 0) {
-          return fontFileName.substring(0, lastDotIndex).toLowerCase()
-        } else {
-          return fontFileName.toLowerCase()
-        }
-      }
-    }
-    dwg.tables.STYLE.entries.forEach(style => {
-      const fontNames: string[] = []
-      let fontName = getFontName(style.font)
-      if (fontName) fontNames.push(fontName)
-      fontName = getFontName(style.bigFont)
-      if (fontName) fontNames.push(fontName)
-      styleMap.set(style.name, fontNames)
-    })
-
-    const fonts: Set<string> = new Set<string>()
-    this.getFontsInBlock(dwg.entities, blockMap, styleMap, fonts)
-    return Array.from(fonts)
-  }
-
-  /**
-   * Iterate entities in model space to get fonts used by text, mtext and insert entities
-   */
-  private getFontsInBlock(
-    entities: DwgEntity[],
-    blockMap: Map<string, DwgBlockRecordTableEntry>,
-    styleMap: Map<string, string[]>,
-    fonts: Set<string>
-  ) {
-    const regex = /\\f(.*?)\|/g
-    entities.forEach(entity => {
-      if (entity.type == 'MTEXT') {
-        const mtext = entity as DwgMTextEntity
-        ;[...mtext.text.matchAll(regex)].forEach(match => {
-          fonts.add(match[1].toLowerCase())
-        })
-        const fontNames = styleMap.get(mtext.styleName)
-        fontNames?.forEach(name => fonts.add(name))
-      } else if (entity.type == 'TEXT') {
-        const text = entity as DwgTextEntity
-        const fontNames = styleMap.get(text.styleName)
-        fontNames?.forEach(name => fonts.add(name))
-      } else if (entity.type == 'INSERT') {
-        const insert = entity as DwgInsertEntity
-        const block = blockMap.get(insert.name)
-        if (block)
-          this.getFontsInBlock(block.entities, blockMap, styleMap, fonts)
-      }
-    })
-  }
-
   protected processLineTypes(model: DwgDatabase, db: AcDbDatabase) {
     const lineTypes = model.tables.LTYPE.entries
     lineTypes.forEach(item => {
-      const lineType: AcGiBaseLineStyle = {
+      const attrs: AcDbLinetypeTableRecordAttrs = {
         name: item.name,
         description: item.description,
         standardFlag: item.standardFlag,
         totalPatternLength: item.totalPatternLength,
         pattern: item.pattern
       }
-      const record = new AcDbLinetypeTableRecord(lineType)
+      const record = new AcDbLinetypeTableRecord(attrs)
       this.processCommonTableEntryAttrs(item, record)
-      record.name = item.name
       db.tables.linetypeTable.add(record)
     })
   }
@@ -176,10 +112,23 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
   protected processTextStyles(model: DwgDatabase, db: AcDbDatabase) {
     const textStyles = model.tables.STYLE.entries
     textStyles.forEach(item => {
-      const record = new AcDbTextStyleTableRecord(item)
+      const attrs: AcDbTextStyleTableRecordAttrs = {
+        name: item.name,
+        standardFlag: item.standardFlag,
+        fixedTextHeight: item.fixedTextHeight,
+        widthFactor: item.widthFactor,
+        obliqueAngle: item.obliqueAngle,
+        textGenerationFlag: item.textGenerationFlag,
+        lastHeight: item.lastHeight,
+        font: item.font,
+        bigFont: item.bigFont,
+        extendedFont: (item as { extendedFont?: string }).extendedFont
+      }
+      const record = new AcDbTextStyleTableRecord(attrs)
       this.processCommonTableEntryAttrs(item, record)
       db.tables.textStyleTable.add(record)
     })
+    db.ensureTextStyleDefaults()
   }
 
   protected processDimStyles(model: DwgDatabase, db: AcDbDatabase) {
@@ -265,7 +214,7 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
     const layers = model.tables.LAYER.entries
     layers.forEach(item => {
       const color = new AcCmColor()
-      color.colorIndex = item.colorIndex
+      this.applyLibreLayerColor(color, item)
       const record = new AcDbLayerTableRecord({
         name: item.name,
         standardFlags: item.standardFlag,
@@ -280,18 +229,58 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
     })
   }
 
+  /**
+   * Maps a libredwg-web {@link DwgLayerTableEntry} colour onto {@link AcCmColor}.
+   *
+   * `libredwg-web` `convertLayer` leaves `colorIndex` at the ByLayer sentinel
+   * **256** for CMC method `0xC2` while storing the real CMC RGB in `color`.
+   * Layer colours cannot be ByLayer — treating 256 as ByLayer washes legend
+   * solid fills white (same failure mode as dwg-converter's Index/256 bug).
+   */
+  private applyLibreLayerColor(
+    target: AcCmColor,
+    item: {
+      colorIndex?: number
+      color?: number
+      colorName?: string
+    }
+  ) {
+    const aci = item.colorIndex
+    const rgb = item.color
+
+    // ACI 1–255 wins. Check ByBlock (0) before the RGB fallback: libredwg's
+    // convertLayer defaults `color` to 0xffffff even for the 0xc3/ByBlock path,
+    // so treating any finite rgb first would mis-map ByBlock layers to white.
+    if (aci != null && aci >= 1 && aci <= 255) {
+      target.colorIndex = aci
+    } else if (aci === 0) {
+      target.colorIndex = 0
+    } else if (rgb != null && Number.isFinite(rgb)) {
+      // colorIndex 256 (or absent): CMC 0xC2 left the real RGB in `color`.
+      target.setRGBValue(rgb & 0xffffff)
+    } else {
+      target.colorIndex = 256
+    }
+
+    if (item.colorName) {
+      target.colorName = item.colorName
+    }
+  }
+
   protected processViewports(model: DwgDatabase, db: AcDbDatabase) {
     const viewports = model.tables.VPORT.entries
     viewports.forEach(item => {
       const record = new AcDbViewportTableRecord()
-      this.processCommonTableEntryAttrs(item, record)
+      // Keep the record TEMP while applying attrs. Assigning the DWG handle
+      // first makes assertOpenForWrite consult workingDatabase and abort
+      // conversion when it is unset (same fix as AcDbDwgConverter).
       if (item.circleSides) {
         record.circleSides = item.circleSides
       }
       record.standardFlag = item.standardFlag
-      record.center.copy(item.center)
-      record.lowerLeftCorner.copy(item.lowerLeftCorner)
-      record.upperRightCorner.copy(item.upperRightCorner)
+      record.center.copy(item.center ?? VPORT_FALLBACK_CENTER_2D)
+      record.lowerLeftCorner.copy(item.lowerLeftCorner ?? VPORT_FALLBACK_LLC)
+      record.upperRightCorner.copy(item.upperRightCorner ?? VPORT_FALLBACK_URC)
       if (item.snapBasePoint) {
         record.snapBase.copy(item.snapBasePoint)
       }
@@ -311,9 +300,13 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
         record.backgroundObjectId = item.backgroundObjectId
       }
 
-      record.gsView.center.copy(item.center)
-      record.gsView.viewDirectionFromTarget.copy(item.viewDirectionFromTarget)
-      record.gsView.viewTarget.copy(item.viewTarget)
+      record.gsView.center.copy(item.center ?? VPORT_FALLBACK_CENTER_2D)
+      record.gsView.viewDirectionFromTarget.copy(
+        item.viewDirectionFromTarget ?? VPORT_FALLBACK_VIEW_DIR
+      )
+      record.gsView.viewTarget.copy(
+        item.viewTarget ?? VPORT_FALLBACK_VIEW_TARGET
+      )
       if (item.lensLength) {
         record.gsView.lensLength = item.lensLength
       }
@@ -325,6 +318,14 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
       }
       if (item.viewHeight) {
         record.gsView.viewHeight = item.viewHeight
+      }
+      const aspectRatio = item.aspectRatio
+      if (
+        aspectRatio != null &&
+        Number.isFinite(aspectRatio) &&
+        aspectRatio > 0
+      ) {
+        record.gsView.aspectRatio = aspectRatio
       }
       if (item.viewTwistAngle) {
         record.gsView.viewTwistAngle = item.viewTwistAngle
@@ -382,6 +383,7 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
       if (item.ambientColor) {
         record.gsView.ambientColor = item.ambientColor
       }
+      this.processCommonTableEntryAttrs(item, record)
       db.tables.viewportTable.add(record)
     })
   }
@@ -392,19 +394,28 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
       let dbBlock = db.tables.blockTable.getAt(btr.name)
       if (!dbBlock) {
         dbBlock = new AcDbBlockTableRecord()
-        dbBlock.objectId = btr.handle
+        // Assign handle last so setAttr stays on a TEMP record (avoids
+        // workingDatabase lookup while the BTR is still unbound).
         dbBlock.name = btr.name
         dbBlock.ownerId = btr.ownerHandle
-        dbBlock.origin.copy(btr.basePoint)
         dbBlock.layoutId = btr.layout
+        // Strip AutoCAD-internal Resolved/Referenced bits — converters do not
+        // bind xref geometry, so those bits must not hide unresolved xrefs.
+        dbBlock.flags = AcDbBlockTableRecord.sanitizeImportedFlags(
+          btr.flags ?? 0
+        )
         dbBlock.blockInsertUnits = btr.insertionUnits
         dbBlock.explodability = btr.explodability
         dbBlock.blockScaling = btr.scalability as AcDbBlockScaling
-        if (btr.bmpPreview) {
-          dbBlock.bmpPreview = btr.bmpPreview
-        }
+        dbBlock.objectId = btr.handle
         db.tables.blockTable.add(dbBlock)
       }
+      // Always sync PreviewIcon (DXF/DWG group 310) — including when the BTR
+      // already existed (e.g. lazily created model/paper space).
+      if (btr.bmpPreview) {
+        dbBlock.previewIcon = acdbHexStringsToBytes([btr.bmpPreview])
+      }
+      dbBlock.origin.copy(btr.basePoint)
 
       // Don't process entities in block space until other blocks are processed
       if (!dbBlock.isModelSapce && btr.entities && btr.entities.length > 0) {
@@ -493,7 +504,27 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
     })
   }
 
+  protected processClasses(model: DwgDatabase, db: AcDbDatabase) {
+    if (!model.classes?.length) {
+      return
+    }
+    db.classes = model.classes.map(entry => ({
+      name: entry.dxfName,
+      cppClassName: entry.cppName,
+      appName: entry.appName,
+      proxyFlag: entry.capabilitiesFlag,
+      instanceCount: entry.instanceCount,
+      wasProxy: entry.wasAProxyFlag,
+      isEntity: entry.isAnEntityFlag
+    }))
+  }
+
   protected processHeader(model: DwgDatabase, db: AcDbDatabase) {
+    const thumbnail = model.thumbnailImage
+    if (thumbnail?.length) {
+      db.thumbnailImage = thumbnail
+    }
+
     const header = model.header
     // Color index 256 is 'ByLayer'
     if (header.CECOLOR) {
@@ -503,9 +534,15 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
         db.cecolor.setRGBValue(header.CECOLOR.rgb)
       }
     }
-    db.angBase = header.ANGBASE ?? 0
-    db.angDir = header.ANGDIR ?? 0
+    db.angbase = header.ANGBASE ?? 0
+    db.angdir = header.ANGDIR ?? 0
     db.aunits = header.AUNITS ?? 0
+    if (header.AUPREC != null) db.auprec = header.AUPREC
+    if (header.LUNITS != null) db.lunits = header.LUNITS
+    if (header.LUPREC != null) db.luprec = header.LUPREC
+    if (header.UNITMODE != null) db.unitmode = header.UNITMODE
+    if (header.MEASUREMENT != null) db.measurement = header.MEASUREMENT
+    db.celtype = header.CELTYPE ?? ByLayer
     db.celtscale = header.CELTSCALE ?? 1
     db.ltscale = header.LTSCALE ?? 1
     if (header.EXTMAX!) db.extmax = header.EXTMAX
@@ -515,6 +552,11 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
     db.pdmode = header.PDMODE ?? 0
     db.pdsize = header.PDSIZE ?? 0.0
     db.textstyle = header.TEXTSTYLE ?? DEFAULT_TEXT_STYLE
+    const cmleaderStyle =
+      this.normalizeHeaderStringValue(
+        (header as { CMLEADERSTYLE?: string }).CMLEADERSTYLE
+      ) ?? DEFAULT_MLEADER_STYLE
+    db.cmleaderstyle = cmleaderStyle
   }
 
   private processCommonTableEntryAttrs(
@@ -523,12 +565,137 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
   ) {
     dbEntry.name = entry.name
     dbEntry.objectId = entry.handle
-    dbEntry.ownerId = entry.ownerHandle
+    if (entry.ownerHandle != null) {
+      dbEntry.ownerId = entry.ownerHandle
+    }
   }
 
   protected processObjects(model: DwgDatabase, db: AcDbDatabase) {
     this.processLayouts(model, db)
     this.processImageDefs(model, db)
+    this.processLayerFilters(model, db)
+    this.processLayerIndexes(model, db)
+    this.processLayerFilterTree(model, db)
+    this.processMLeaderStyles(model, db)
+    this.processDynBlockMetadata(model, db)
+  }
+
+  /**
+   * Imports extension dictionaries and (when present) representation pointers
+   * so {@link AcDbDynBlockReference} works with LibreDWG-parsed drawings.
+   *
+   * LibreDWG does not expose a typed `ACDB_BLOCKREPRESENTATION_DATA` object;
+   * we still import the dictionary graph so `AcDbBlockRepresentation` /
+   * `ACAD_ENHANCEDBLOCK` keys resolve. When a dictionary entry named
+   * `AcDbRepData` points at a handle that is not a converted object, a
+   * placeholder is created by {@link acdbImportDynBlockMetadata}.
+   */
+  private processDynBlockMetadata(model: DwgDatabase, db: AcDbDatabase) {
+    const normalize = (handle?: string | number) =>
+      handle == null || handle === '' || handle === 0
+        ? ''
+        : String(handle).trim().toUpperCase()
+
+    // BTR extension dictionaries (when LibreDWG exposes them on entries).
+    for (const btr of model.tables.BLOCK_RECORD.entries) {
+      const dbBlock = db.tables.blockTable.getAt(btr.name)
+      if (!dbBlock) continue
+      const raw = btr as {
+        extensionDictionary?: string
+        ownerDictionaryHardId?: string | number
+        ownerDictionarySoftId?: string | number
+      }
+      const xdict = acdbNormalizeExtensionDictionaryId(
+        raw.extensionDictionary ??
+          raw.ownerDictionaryHardId ??
+          raw.ownerDictionarySoftId
+      )
+      if (xdict) {
+        dbBlock.extensionDictionary = xdict
+      }
+    }
+
+    const dictObjects = model.objects.DICTIONARY
+    if (!dictObjects?.length) return
+
+    const dictionaries = dictObjects.map(dict => {
+      const entries: Array<{ name: string; handle: string }> = []
+      const src = dict.entries ?? {}
+      for (const name in src) {
+        const target = src[name]
+        if (name && target) {
+          entries.push({ name, handle: normalize(String(target)) })
+        }
+      }
+      return {
+        handle: normalize(dict.handle),
+        ownerHandle: normalize(dict.ownerHandle) || undefined,
+        entries
+      }
+    })
+
+    // LibreDWG does not currently surface typed representation-data objects.
+    // Leave representationData empty; DynBlock still works for *U inserts via
+    // blockName, and ACAD_ENHANCEDBLOCK detection works via dictionaries.
+    acdbImportDynBlockMetadata(db, { dictionaries, representationData: [] })
+  }
+
+  /**
+   * Reconstructs the Layer Manager filter tree (`AcLy*` classes) from the
+   * `ACAD_LAYERFILTERS` / `ACLYDICTIONARY` dictionaries and their XRecords.
+   *
+   * @remarks
+   * Reads `DICTIONARY` and `XRECORD` objects from the parsed DWG. When either
+   * collection is empty, nested filter payloads are unavailable and this
+   * method is a no-op.
+   *
+   * @param model - Parsed DWG database.
+   * @param db - Target database whose {@link AcDbDatabase.layerFilters} is set.
+   */
+  private processLayerFilterTree(model: DwgDatabase, db: AcDbDatabase) {
+    const dictObjects = model.objects.DICTIONARY
+    const xrecordObjects = model.objects.XRECORD
+    if (!dictObjects?.length || !xrecordObjects?.length) {
+      return
+    }
+
+    const normalize = (handle?: string) =>
+      handle ? String(handle).trim().toUpperCase() : ''
+
+    const dictionaries: AcDbLayerFilterPersistSource['dictionaries'] = new Map()
+    dictObjects.forEach(dict => {
+      const entries: Record<string, string> = {}
+      const src = dict.entries ?? {}
+      for (const name in src) {
+        const target = src[name]
+        if (name && target) {
+          entries[name] = normalize(String(target))
+        }
+      }
+      dictionaries.set(normalize(dict.handle), {
+        handle: normalize(dict.handle),
+        ownerObjectId: normalize(dict.ownerHandle),
+        entries
+      })
+    })
+
+    const xrecords: AcDbLayerFilterPersistSource['xrecords'] = new Map()
+    xrecordObjects.forEach(xrecord => {
+      xrecords.set(normalize(xrecord.handle), {
+        handle: normalize(xrecord.handle),
+        ownerObjectId: normalize(xrecord.ownerHandle),
+        extensionDictionaryId: normalize(xrecord.extensionDictionary),
+        data: (xrecord.data ?? []).map(group => ({
+          code: Number(group.code),
+          value: group.value
+        }))
+      })
+    })
+
+    const tree = acdbReadLayerFilterTree({ dictionaries, xrecords })
+    if (tree.root.getNestedFilters().length > 0) {
+      db.layerFilters = tree
+    }
   }
 
   private processLayouts(model: DwgDatabase, db: AcDbDatabase) {
@@ -582,12 +749,50 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
     })
   }
 
+  private processLayerFilters(model: DwgDatabase, db: AcDbDatabase) {
+    const layerFilters = model.objects.LAYER_FILTER
+    if (!layerFilters?.length) return
+
+    const layerFilterDict = db.objects.layerFilter
+    const objectConverter = new AcDbObjectConverter()
+    layerFilters.forEach(filter => {
+      const dbFilter = objectConverter.convertLayerFilter(filter)
+      layerFilterDict.setAt(dbFilter.objectId, dbFilter)
+    })
+  }
+
+  private processLayerIndexes(model: DwgDatabase, db: AcDbDatabase) {
+    const layerIndexes = model.objects.LAYER_INDEX
+    if (!layerIndexes?.length) return
+
+    const layerIndexDict = db.objects.layerIndex
+    const objectConverter = new AcDbObjectConverter()
+    layerIndexes.forEach(index => {
+      const dbIndex = objectConverter.convertLayerIndex(index)
+      layerIndexDict.setAt(dbIndex.objectId, dbIndex)
+    })
+  }
+
+  private processMLeaderStyles(model: DwgDatabase, db: AcDbDatabase) {
+    const mleaderStyles = model.objects.MLEADERSTYLE
+    if (!mleaderStyles?.length) return
+
+    const mleaderStyleDict = db.objects.mleaderStyle
+    const objectConverter = new AcDbObjectConverter()
+    mleaderStyles.forEach(style => {
+      const dbStyle = objectConverter.convertMLeaderStyle(style)
+      mleaderStyleDict.setAt(dbStyle.objectId, dbStyle)
+    })
+  }
+
   private processCommonObjectAttrs(
     object: DwgCommonObject,
     dbObject: AcDbObject
   ) {
     dbObject.objectId = object.handle
-    dbObject.ownerId = object.ownerHandle
+    if (object.ownerHandle != null) {
+      dbObject.ownerId = object.ownerHandle
+    }
   }
 
   /**
@@ -615,10 +820,24 @@ export class AcDbLibreDwgConverter extends AcDbDatabaseConverter<DwgDatabase> {
       groups[entity.type].push(entity)
     }
 
-    return order.flatMap(type => groups[type])
+    const result: DwgEntity[] = []
+    for (const type of order) {
+      // Avoid push(...group): large same-type groups hit apply arg limits.
+      const group = groups[type]
+      for (let i = 0; i < group.length; i++) {
+        result.push(group[i])
+      }
+    }
+    return result
   }
 
   private isModelSpace(name: string) {
     return name && name.toUpperCase() == MODEL_SPACE
+  }
+
+  private normalizeHeaderStringValue(value: unknown) {
+    if (typeof value !== 'string') return undefined
+    const trimmed = value.trim()
+    return trimmed.length > 0 ? trimmed : undefined
   }
 }

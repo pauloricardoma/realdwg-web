@@ -1,10 +1,19 @@
-import { AcDbDxfFiler } from '../base'
+import { AcDbDxfFiler } from '../base/AcDbDxfFiler'
 import {
   AcDbAttributeFlags,
   AcDbAttributeMTextFlag
 } from './AcDbAttributeDefinition'
+import { AcDbEntity } from './AcDbEntity'
 import { AcDbMText } from './AcDbMText'
 import { AcDbText } from './AcDbText'
+
+function isBlockReferenceOwner(
+  owner: unknown
+): owner is AcDbEntity & { blockTableRecord: unknown } {
+  return (
+    owner != null && typeof owner === 'object' && 'blockTableRecord' in owner
+  )
+}
 
 /**
  * Represents an attribute entity attached to a block reference (INSERT).
@@ -22,6 +31,24 @@ export class AcDbAttribute extends AcDbText {
 
   override get dxfTypeName() {
     return 'ATTRIB'
+  }
+
+  /**
+   * Resolves ByBlock color against the owning INSERT, not CECOLOR.
+   *
+   * AutoCAD attributes inherit block-reference traits for ByBlock color. When
+   * the INSERT sits on a layer such as `Viewport` with ACI 7, attribute text
+   * must follow that foreground colour (inverted on paper) rather than the
+   * current-entity colour sysvar.
+   */
+  override get resolvedColor() {
+    if (this.color.isByBlock) {
+      const owner = this.database?.tables.blockTable.getEntityById(this.ownerId)
+      if (isBlockReferenceOwner(owner)) {
+        return owner.resolvedColor
+      }
+    }
+    return this.resolveStandardColor()
   }
 
   /**
@@ -285,4 +312,50 @@ export class AcDbAttribute extends AcDbText {
     }
     return this
   }
+
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    filer.atSubclassData('AcDbAttribute')
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      const n = Number(item.value)
+      switch (code) {
+        case 2:
+          this.tag = String(item.value)
+          break
+        case 70:
+          this.isInvisible = (n & AcDbAttributeFlags.Invisible) !== 0
+          this.isConst = (n & AcDbAttributeFlags.Const) !== 0
+          this.isVerifiable = (n & AcDbAttributeFlags.Verifiable) !== 0
+          this.isPreset = (n & AcDbAttributeFlags.Preset) !== 0
+          break
+        case 71:
+          this.isMTextAttribute =
+            (n & AcDbAttributeMTextFlag.MultiLine) !== 0
+          this.isConstMTextAttribute =
+            (n & AcDbAttributeMTextFlag.ConstMultiLine) !== 0
+          break
+        case 73:
+          this.fieldLength = n
+          break
+        case 74:
+          // DXF: vertical text justification for ATTRIB.
+          this.verticalMode = n
+          break
+        case 280:
+          this.lockPositionInBlock = n !== 0
+          break
+        case 340:
+          // Soft-pointer ID to FIELD object — optional; keep scanning.
+          break
+        default:
+          break
+      }
+    }
+    return this
+  }
 }
+

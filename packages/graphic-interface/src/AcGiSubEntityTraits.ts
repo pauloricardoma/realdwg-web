@@ -10,14 +10,10 @@ import { AcGiLineWeight } from './AcGiLineWeight'
  */
 export interface AcGiSubEntityTraits {
   /**
-   * The RGB color.
-   * It resolves layer colors and block colors as needed and converts color index
-   * to actual RGB color.
-   */
-  rgbColor: number
-
-  /**
-   * Color of the entity.
+   * Resolved semantic color of the sub-entity.
+   *
+   * Use {@link AcGiContext.resolveSubEntityTraitsRgb} with {@link AcGiRenderer.context}
+   * to obtain the pixel RGB value at draw time (including ACI 7 foreground handling).
    */
   color: AcCmColor
 
@@ -65,4 +61,25 @@ export interface AcGiSubEntityTraits {
    * Corresponds to AutoCAD layer name (i.e. current layer in drawing).
    */
   layer: string
+
+  /**
+   * Explicit render-order tier used when different primitive types
+   * share the same Z plane.
+   *
+   * Lower values render earlier. The default `0` matches normal
+   * linework / text. Solid hatches use `-1` so they stay below
+   * outlines and text, while wide polylines keep `0` because they
+   * are visually linework even though they are rasterized as meshes.
+   */
+  drawOrder: number
+
+  /**
+   * When true, solid fills use the current canvas / layout background
+   * colour and track theme flips, ignoring {@link color}.
+   *
+   * Used by wipeouts so the masked area matches the paper rather than
+   * the entity's ACI colour (which is typically ACI 7 / black on a light
+   * background).
+   */
+  isBackgroundFill?: boolean
 }

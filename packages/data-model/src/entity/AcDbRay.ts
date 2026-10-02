@@ -1,15 +1,20 @@
 import {
   AcGeBox3d,
+  AcGeIntersectPrimitive,
+  AcGeLine3d,
+  AcGeMatrix3d,
+  acgeOffsetPointByDirectionInXY,
   AcGePoint3d,
   AcGePoint3dLike,
-  AcGeVector3d
-} from '@mlightcad/geometry-engine'
+  AcGeVector3d,
+  AcGeVector3dLike} from '@mlightcad/geometry-engine'
 import { AcGiRenderer } from '@mlightcad/graphic-interface'
 
-import { AcDbDxfFiler } from '../base'
-import { AcDbOsnapMode } from '../misc'
+import { AcDbDxfFiler } from '../base/AcDbDxfFiler'
+import { AcDbOsnapMode } from '../misc/AcDbOsnapMode'
 import { AcDbCurve } from './AcDbCurve'
 import { AcDbEntityProperties } from './AcDbEntityProperties'
+import { acdbMovePrimaryGripPointAt } from './AcDbGripHelpers'
 
 /**
  * Represents a ray entity in AutoCAD.
@@ -136,6 +141,11 @@ export class AcDbRay extends AcDbCurve {
     return false
   }
 
+  /** @inheritdoc */
+  get area(): number {
+    return 0
+  }
+
   /**
    * Gets the geometric extents (bounding box) of this ray.
    *
@@ -159,6 +169,18 @@ export class AcDbRay extends AcDbCurve {
       this._unitDir.clone().multiplyScalar(-10).add(this._basePoint)
     )
     return extents
+  }
+
+  /** @inheritdoc */
+  override subGetIntersectCurves(): AcGeIntersectPrimitive[] {
+    const end = this._basePoint.clone().add(this._unitDir)
+    return [
+      {
+        kind: 'line',
+        line: new AcGeLine3d(this._basePoint, end),
+        extent: 'ray'
+      }
+    ]
   }
 
   /**
@@ -271,6 +293,12 @@ export class AcDbRay extends AcDbCurve {
     return gripPoints
   }
 
+  /** @inheritdoc */
+  subMoveGripPointsAt(indices: number[], offset: AcGeVector3dLike) {
+    acdbMovePrimaryGripPointAt(indices, offset, this.basePoint)
+    return this
+  }
+
   /**
    * Gets the object snap points for this trace.
    *
@@ -285,17 +313,55 @@ export class AcDbRay extends AcDbCurve {
    */
   subGetOsnapPoints(
     osnapMode: AcDbOsnapMode,
-    _pickPoint: AcGePoint3dLike,
+    pickPoint: AcGePoint3dLike,
     _lastPoint: AcGePoint3dLike,
     snapPoints: AcGePoint3dLike[]
   ) {
+    const origin = this.basePoint
+
+    if (osnapMode === AcDbOsnapMode.EndPoint) {
+      snapPoints.push(origin)
+      return
+    }
+
+    const direction = this.unitDir.clone()
+    if (direction.lengthSq() === 0) return
+
+    direction.normalize()
+    const line = new AcGeLine3d(origin, origin.clone().add(direction))
+
     switch (osnapMode) {
-      case AcDbOsnapMode.EndPoint:
-        snapPoints.push(this.basePoint)
+      case AcDbOsnapMode.Nearest: {
+        const projected = line.project(pickPoint)
+        const offset = new AcGeVector3d(projected).sub(origin)
+        const t = offset.dot(direction)
+        snapPoints.push(t < 0 ? origin : projected)
+        break
+      }
+      case AcDbOsnapMode.Perpendicular:
+        snapPoints.push(line.perpPoint(pickPoint))
         break
       default:
         break
     }
+  }
+
+  /**
+   * Transforms this ray by the specified matrix.
+   */
+  transformBy(matrix: AcGeMatrix3d) {
+    this._basePoint.applyMatrix4(matrix)
+    this._unitDir.transformDirection(matrix)
+    return this
+  }
+
+  /**
+   * This ray always draws as a single `lineStrip` primitive.
+   *
+   * @internal
+   */
+  override get directBatchPrimitive() {
+    return 'lineStrip' as const
   }
 
   /**
@@ -330,4 +396,95 @@ export class AcDbRay extends AcDbCurve {
     filer.writeVector3d(11, this.unitDir)
     return this
   }
+
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    filer.atSubclassData('AcDbRay')
+
+    let bx = this.basePoint.x
+    let by = this.basePoint.y
+    let bz = this.basePoint.z
+    let dx = this.unitDir.x
+    let dy = this.unitDir.y
+    let dz = this.unitDir.z
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      const n = Number(item.value)
+      switch (code) {
+        case 10:
+          bx = n
+          break
+        case 20:
+          by = n
+          break
+        case 30:
+          bz = n
+          break
+        case 11:
+          dx = n
+          break
+        case 21:
+          dy = n
+          break
+        case 31:
+          dz = n
+          break
+        default:
+          break
+      }
+    }
+
+    this.basePoint = new AcGePoint3d(bx, by, bz)
+    this.unitDir = new AcGeVector3d(dx, dy, dz)
+    return this
+  }
+
+  /**
+   * {@inheritDoc AcDbCurve.getOffsetCurves}
+   *
+   * Returns a parallel ray: the base point shifts perpendicular to the XY projection
+   * of {@link unitDir} by `offsetDist`, while direction is unchanged. Fails when the
+   * direction is degenerate in the XY plane.
+   */
+  override getOffsetCurves(offsetDist: number): AcDbCurve[] {
+    const curve = this.createOffsetCurve(offsetDist)
+    return curve ? [curve] : []
+  }
+
+  /**
+   * {@inheritDoc AcDbCurve.getOffsetSideAtPoint}
+   *
+   * Uses the 2D cross product of the ray direction with the vector from
+   * {@link basePoint} to `point`, normalized by the XY length of the direction.
+   */
+  override getOffsetSideAtPoint(point: AcGePoint3dLike): 1 | -1 {
+    const bp = this.basePoint
+    const dir = this.unitDir
+    const len = Math.hypot(dir.x, dir.y)
+    if (len <= 1e-9) return 1
+    return (dir.x * (point.y - bp.y) - dir.y * (point.x - bp.x)) / len >= 0
+      ? 1
+      : -1
+  }
+
+  /**
+   * @param offsetDist - Signed offset distance in drawing units (perpendicular in XY)
+   * @returns Parallel ray, or `null` when {@link unitDir} has negligible XY component
+   */
+  private createOffsetCurve(offsetDist: number): AcDbRay | null {
+    const offsetPoint = acgeOffsetPointByDirectionInXY(
+      this.basePoint,
+      this.unitDir,
+      offsetDist
+    )
+    if (!offsetPoint) return null
+    const ray = new AcDbRay()
+    ray.basePoint = offsetPoint
+    ray.unitDir = this.unitDir.clone()
+    return ray
+  }
 }
+

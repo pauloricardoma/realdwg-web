@@ -1,15 +1,30 @@
-import { AcDbDxfFiler } from '../base'
-import { AcDbSymbolTableRecord } from './AcDbSymbolTableRecord'
+import { AcDbDxfFiler } from '../base/AcDbDxfFiler'
+import {
+  AcDbSymbolTableRecord,
+  AcDbSymbolTableRecordAttrs
+} from './AcDbSymbolTableRecord'
+
+/**
+ * Interface defining the attributes for registered application table records.
+ */
+export type AcDbRegAppTableRecordAttrs = AcDbSymbolTableRecordAttrs
 
 /**
  * Represents records in the AcDbRegAppTable (known as the APPID symbol table in AutoCAD and DXF).
  * Each of these records represents an application ID used to identify a group of Extended Entity
  * Data attached to objects in the drawing database.
  */
-export class AcDbRegAppTableRecord extends AcDbSymbolTableRecord {
-  constructor(name: string) {
-    super()
-    this.name = name
+export class AcDbRegAppTableRecord extends AcDbSymbolTableRecord<AcDbRegAppTableRecordAttrs> {
+  /**
+   * Creates a new AcDbRegAppTableRecord instance.
+   *
+   * @param attrs - Input attribute values, or the application name as a string
+   */
+  constructor(attrs?: Partial<AcDbRegAppTableRecordAttrs> | string) {
+    if (typeof attrs === 'string') {
+      attrs = { name: attrs }
+    }
+    super(attrs)
   }
 
   /**
@@ -25,4 +40,32 @@ export class AcDbRegAppTableRecord extends AcDbSymbolTableRecord {
     filer.writeInt16(70, 0)
     return this
   }
+
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    filer.atSubclassData('AcDbSymbolTableRecord')
+    filer.atSubclassData('AcDbRegAppTableRecord')
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      if (code === 100) {
+        filer.pushBackItem(item)
+        break
+      }
+      switch (code) {
+        case 2:
+          this.name = String(item.value)
+          break
+        case 70:
+          // Standard flags — unused beyond presence.
+          break
+        default:
+          break
+      }
+    }
+    return this
+  }
 }
+

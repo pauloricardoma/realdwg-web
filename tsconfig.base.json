@@ -20,10 +20,10 @@
     "skipLibCheck": true,
     "downlevelIteration": true,
     "jsx": "react-jsx",
-    "moduleResolution": "node"
+    "moduleResolution": "node",
+    "baseUrl": "."
   },
   "ts-node": {
-    "esm": true,
-  },
+    "esm": true
+  }
 }
- 

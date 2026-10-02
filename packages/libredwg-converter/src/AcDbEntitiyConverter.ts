@@ -1,29 +1,47 @@
 import {
+  AcCmColor,
   AcCmTransparency,
   AcDb2dPolyline,
   AcDb3dPolyline,
   AcDb3PointAngularDimension,
   AcDbAlignedDimension,
   AcDbArc,
+  AcDbArcAlignedText,
   AcDbAttribute,
   AcDbAttributeDefinition,
   AcDbAttributeFlags,
   AcDbAttributeMTextFlag,
   AcDbBlockReference,
   AcDbCircle,
+  acdbDecodeMLeaderStyleRawColor,
   AcDbDiametricDimension,
   AcDbDimension,
+  AcDbDxfCode,
   AcDbEllipse,
   AcDbEntity,
   AcDbFace,
+  AcDbFcf,
   AcDbHatch,
+  AcDbHatchObjectType,
   AcDbHatchPatternType,
   AcDbHatchStyle,
+  acdbHexStringsToBytes,
   AcDbLeader,
   AcDbLeaderAnnotationType,
   AcDbLine,
   AcDbLineSpacingStyle,
+  AcDbMLeader,
+  AcDbMLeaderContentType,
+  AcDbMLeaderLineType,
+  AcDbMLeaderTextAttachmentDirection,
+  AcDbMLine,
+  AcDbMLineJustification,
   AcDbMText,
+  acdbNormalizeExtensionDictionaryId,
+  AcDbOle2Frame,
+  AcDbOleFrame,
+  AcDbOleObjectType,
+  AcDbOleTileMode,
   AcDbOrdinateDimension,
   AcDbPoint,
   AcDbPoly2dType,
@@ -31,17 +49,20 @@ import {
   AcDbPolyFaceMesh,
   AcDbPolygonMesh,
   AcDbPolyline,
+  AcDbProxyEntity,
   AcDbRadialDimension,
   AcDbRasterImage,
   AcDbRasterImageClipBoundaryType,
   AcDbRay,
+  AcDbRotatedDimension,
+  AcDbShape,
+  AcDbSolid,
   AcDbSpline,
   AcDbTable,
   AcDbTableCell,
   AcDbText,
   AcDbTextHorizontalMode,
   AcDbTextVerticalMode,
-  AcDbTrace,
   AcDbViewport,
   AcDbWipeout,
   AcDbXline,
@@ -55,6 +76,7 @@ import {
   AcGePoint3dLike,
   AcGePolyline2d,
   AcGeSpline3d,
+  acgeTransformOcsPointToWcs,
   AcGeVector2d,
   AcGeVector3d,
   AcGiMTextAttachmentPoint,
@@ -75,6 +97,7 @@ import type {
   DwgEllipseEdge,
   DwgEllipseEntity,
   DwgEntity,
+  DwgGradientHatchEntity,
   DwgHatchEntity,
   DwgImageEntity,
   DwgInsertEntity,
@@ -82,29 +105,101 @@ import type {
   DwgLineEdge,
   DwgLineEntity,
   DwgLWPolylineEntity,
+  DwgMLineEntity,
   DwgMTextEntity,
+  DwgMultiLeaderEntity,
+  DwgOle2FrameEntity,
+  DwgOleFrameEntity,
   DwgOrdinateDimensionEntity,
   DwgPointEntity,
   DwgPolyline2dEntity,
   DwgPolyline3dEntity,
   DwgPolylineBoundaryPath,
+  DwgProxyEntity,
   DwgRadialDiameterDimensionEntity,
   DwgRayEntity,
+  DwgShapeEntity,
   DwgSolidEntity,
   DwgSplineEdge,
   DwgSplineEntity,
   DwgTableEntity,
   DwgTextEntity,
+  DwgToleranceEntity,
   DwgViewportEntity,
   DwgWipeoutEntity,
   DwgXlineEntity
 } from '@mlightcad/libredwg-web'
+
+/**
+ * Arc-aligned text. libredwg-web 0.7.x recognizes `DWG_TYPE_ARCALIGNEDTEXT`
+ * but does not decode its fields (the file open reports an unhandled class),
+ * so this shape is only produced once that decoder fills the entity.
+ */
+interface DwgArcAlignedTextEntity extends DwgEntity {
+  type: 'ARCALIGNEDTEXT'
+  text: string
+  textSize: number
+  xScale: number
+  characterSpacing: number
+  styleName: string
+  fontName: string
+  bigFontName: string
+  offsetFromArc: number
+  rightOffset: number
+  leftOffset: number
+  center: { x: number; y: number; z: number }
+  radius: number
+  startAngle: number
+  endAngle: number
+  extrusionDirection: { x: number; y: number; z: number }
+  rawTextColor: number
+  characterSet: number
+  pitchAndFamily: number
+  isShx: boolean
+  isBold: boolean
+  isItalic: boolean
+  isUnderlined: boolean
+  alignment: number
+  isReverse: boolean
+  wizardFlag: number
+  textPosition: number
+  textDirection: number
+  arcHandle: string
+}
+
+type ParsedMLeaderBreak = {
+  index?: number
+  start: AcGePoint3dLike
+  end: AcGePoint3dLike
+}
+
+type ParsedMLeaderLine = {
+  vertices: AcGePoint3dLike[]
+  breakPointIndexes?: number[]
+  leaderLineIndex?: number
+  breaks?: ParsedMLeaderBreak[]
+}
+
+type ParsedMLeaderLeader = {
+  lastLeaderLinePoint?: AcGePoint3dLike
+  lastLeaderLinePointSet?: boolean
+  doglegVector?: AcGePoint3dLike
+  doglegVectorSet?: boolean
+  doglegLength?: number
+  breaks?: ParsedMLeaderBreak[]
+  leaderBranchIndex?: number
+  leaderLines?: ParsedMLeaderLine[]
+}
 
 export class AcDbEntityConverter {
   convert(entity: DwgEntity): AcDbEntity | null {
     const dbEntity = this.createEntity(entity)
     if (dbEntity) {
       this.processCommonAttrs(entity, dbEntity)
+      if (entity.type === 'ARCALIGNEDTEXT') {
+        const raw = (entity as DwgArcAlignedTextEntity).rawTextColor
+        ;(dbEntity as AcDbArcAlignedText).applyRawTextColor(raw)
+      }
     }
     return dbEntity
   }
@@ -121,6 +216,8 @@ export class AcDbEntityConverter {
       return this.convertArc(entity as DwgArcEntity)
     } else if (entity.type == 'ATTDEF') {
       return this.convertAttributeDefinition(entity as DwgAttdefEntity)
+    } else if (entity.type == 'ATTRIB') {
+      return this.convertAttribute(entity as DwgAttribEntity)
     } else if (entity.type == 'CIRCLE') {
       return this.convertCirle(entity as DwgCircleEntity)
     } else if (entity.type == 'DIMENSION') {
@@ -137,8 +234,12 @@ export class AcDbEntityConverter {
       return this.convertLine(entity as DwgLineEntity)
     } else if (entity.type == 'LWPOLYLINE') {
       return this.convertLWPolyline(entity as DwgLWPolylineEntity)
+    } else if (entity.type == 'MLINE') {
+      return this.convertMLine(entity as DwgMLineEntity)
     } else if (entity.type == 'MTEXT') {
       return this.convertMText(entity as DwgMTextEntity)
+    } else if (entity.type == 'MULTILEADER' || entity.type == 'MLEADER') {
+      return this.convertMLeader(entity as DwgMultiLeaderEntity)
     } else if (entity.type == 'POINT') {
       return this.convertPoint(entity as DwgPointEntity)
     } else if (entity.type == 'POLYLINE2D') {
@@ -153,6 +254,10 @@ export class AcDbEntityConverter {
       return this.convertTable(entity as DwgTableEntity)
     } else if (entity.type == 'TEXT') {
       return this.convertText(entity as DwgTextEntity)
+    } else if (entity.type == 'TOLERANCE') {
+      return this.convertTolerance(entity as DwgToleranceEntity)
+    } else if (entity.type == 'SHAPE') {
+      return this.convertShape(entity as DwgShapeEntity)
     } else if (entity.type == 'SOLID') {
       return this.convertSolid(entity as DwgSolidEntity)
     } else if (entity.type == 'VIEWPORT') {
@@ -163,8 +268,42 @@ export class AcDbEntityConverter {
       return this.convertXline(entity as DwgXlineEntity)
     } else if (entity.type == 'INSERT') {
       return this.convertBlockReference(entity as DwgInsertEntity)
+    } else if (entity.type == 'ACAD_PROXY_ENTITY') {
+      return this.convertProxyEntity(entity as DwgProxyEntity)
+    } else if (entity.type == 'OLE2FRAME') {
+      return this.convertOle2Frame(entity as DwgOle2FrameEntity)
+    } else if (entity.type == 'OLEFRAME') {
+      return this.convertOleFrame(entity as DwgOleFrameEntity)
+    } else if (entity.type == 'ARCALIGNEDTEXT') {
+      return this.convertArcAlignedText(entity as DwgArcAlignedTextEntity)
     }
     return null
+  }
+
+  /**
+   * Converts a DWG ACAD_PROXY_ENTITY to an AcDbProxyEntity.
+   */
+  private convertProxyEntity(entity: DwgProxyEntity): AcDbProxyEntity {
+    const proxy = new AcDbProxyEntity()
+    proxy.proxyEntityClassId = entity.proxyEntityClassId
+    if (entity.originalDxfName) {
+      proxy.originalDxfName = entity.originalDxfName
+    }
+    if (entity.applicationEntityClassId != null) {
+      proxy.applicationEntityClassId = entity.applicationEntityClassId
+    }
+    if (entity.objectDrawingFormat != null) {
+      proxy.objectDrawingFormat = entity.objectDrawingFormat
+    }
+    if (entity.originalDataFormat != null) {
+      proxy.originalDataFormat = entity.originalDataFormat
+    }
+    if (entity.graphicsData) {
+      const bytes = acdbHexStringsToBytes([entity.graphicsData])
+      const size = entity.graphicsDataSize ?? bytes.length
+      proxy.setProxyGraphic(bytes.subarray(0, size))
+    }
+    return proxy
   }
 
   private convertFace(face: Dwg3dFaceEntity) {
@@ -178,21 +317,23 @@ export class AcDbEntityConverter {
   }
 
   private convertArc(arc: DwgArcEntity) {
+    const normal = arc.extrusionDirection ?? AcGeVector3d.Z_AXIS
     const dbEntity = new AcDbArc(
-      arc.center,
+      acgeTransformOcsPointToWcs(arc.center, normal),
       arc.radius,
       arc.startAngle,
       arc.endAngle,
-      arc.extrusionDirection ?? AcGeVector3d.Z_AXIS
+      normal
     )
     return dbEntity
   }
 
   private convertCirle(circle: DwgCircleEntity) {
+    const normal = circle.extrusionDirection ?? AcGeVector3d.Z_AXIS
     const dbEntity = new AcDbCircle(
-      circle.center,
+      acgeTransformOcsPointToWcs(circle.center, normal),
       circle.radius,
-      circle.extrusionDirection ?? AcGeVector3d.Z_AXIS
+      normal
     )
     return dbEntity
   }
@@ -223,29 +364,8 @@ export class AcDbEntityConverter {
   }
 
   private convertSpline(spline: DwgSplineEntity) {
-    // Catch error to construct spline because it maybe one spline in one block.
-    // If don't catch the error, the block conversion may be interruptted.
-    try {
-      if (spline.numberOfControlPoints > 0 && spline.numberOfKnots > 0) {
-        return new AcDbSpline(
-          spline.controlPoints,
-          spline.knots,
-          spline.weights,
-          spline.degree,
-          !!(spline.flag & 0x01)
-        )
-      } else if (spline.numberOfFitPoints > 0) {
-        return new AcDbSpline(
-          spline.fitPoints,
-          'Uniform',
-          spline.degree,
-          !!(spline.flag & 0x01)
-        )
-      }
-    } catch (error) {
-      console.log(`Failed to convert spline with error: ${error}`)
-    }
-    return null
+    // One invalid spline must not interrupt block conversion.
+    return AcDbSpline.fromDwgSpline(spline)
   }
 
   private convertPoint(point: DwgPointEntity) {
@@ -254,8 +374,25 @@ export class AcDbEntityConverter {
     return dbEntity
   }
 
+  private convertShape(shape: DwgShapeEntity) {
+    const normal = shape.extrusionDirection ?? AcGeVector3d.Z_AXIS
+    const dbEntity = new AcDbShape()
+    dbEntity.position = acgeTransformOcsPointToWcs(shape.insertionPoint, normal)
+    dbEntity.size = shape.size
+    dbEntity.shapeNumber = shape.shapeNumber
+    if (shape.styleName) {
+      dbEntity.styleName = shape.styleName
+    }
+    dbEntity.rotation = shape.rotation ?? 0
+    dbEntity.widthFactor = shape.xScale ?? 1
+    dbEntity.oblique = shape.obliqueAngle ?? 0
+    dbEntity.thickness = shape.thickness ?? 0
+    dbEntity.normal.copy(normal)
+    return dbEntity
+  }
+
   private convertSolid(solid: DwgSolidEntity) {
-    const dbEntity = new AcDbTrace()
+    const dbEntity = new AcDbSolid()
     dbEntity.setPointAt(0, { ...solid.corner1, z: 0 })
     dbEntity.setPointAt(1, { ...solid.corner2, z: 0 })
     dbEntity.setPointAt(2, { ...solid.corner3, z: 0 })
@@ -263,7 +400,7 @@ export class AcDbEntityConverter {
       3,
       solid.corner4 ? { ...solid.corner4, z: 0 } : { ...solid.corner3, z: 0 }
     )
-    dbEntity.thickness = solid.thickness
+    dbEntity.thickness = solid.thickness ?? 0
     return dbEntity
   }
 
@@ -271,13 +408,14 @@ export class AcDbEntityConverter {
     // Libredwg changes meaning of the 'flag' field. '512' means closed.
     const dbEntity = new AcDbPolyline()
     dbEntity.closed = !!(polyline.flag & 0x200)
+    const defaultWidth = polyline.constantWidth ?? -1
     polyline.vertices.forEach((vertex, index) => {
       dbEntity.addVertexAt(
         index,
         new AcGePoint2d(vertex.x, vertex.y),
         vertex.bulge,
-        vertex.startWidth,
-        vertex.endWidth
+        vertex.startWidth ?? defaultWidth,
+        vertex.endWidth ?? defaultWidth
       )
     })
     return dbEntity
@@ -372,15 +510,19 @@ export class AcDbEntityConverter {
           polyType = AcDbPoly2dType.QuadSplinePoly
         }
       }
-      return new AcDb2dPolyline(
+      const dbPolyline = new AcDb2dPolyline(
         polyType,
         vertices,
-        0,
+        vertices[0]?.z ?? 0,
         isClosed,
         polyline.startWidth,
         polyline.endWidth,
         bulges
       )
+      if (polyline.extrusionDirection) {
+        dbPolyline.normal = polyline.extrusionDirection
+      }
+      return dbPolyline
     }
   }
 
@@ -437,10 +579,15 @@ export class AcDbEntityConverter {
         dashLengths: item.numberOfDashLengths > 0 ? item.dashLengths : []
       })
     })
-    // Important: Don't use DwgHatchSolidFill.SolidFill to avoid bundling libredwg-web into libredeg-converter
-    dbEntity.isSolidFill = hatch.solidFill == 1
+    // Important: Don't use DwgHatchSolidFill.SolidFill to avoid bundling libredwg-web into libredeg-converter.
+    // Set patternName first: its setter derives isSolidFill from the name (incl. LibreDWG's
+    // `_SOLID`). Then OR in the binary solidFill flag so solid fills stay solid even when
+    // the pattern string is unexpected.
     dbEntity.hatchStyle = hatch.hatchStyle as unknown as AcDbHatchStyle
     dbEntity.patternName = hatch.patternName
+    if (hatch.solidFill == 1) {
+      dbEntity.isSolidFill = true
+    }
     dbEntity.patternType = hatch.patternType as unknown as AcDbHatchPatternType
     dbEntity.patternAngle = hatch.patternAngle == null ? 0 : hatch.patternAngle
     dbEntity.patternScale = hatch.patternScale == null ? 0 : hatch.patternScale
@@ -511,38 +658,11 @@ export class AcDbEntityConverter {
               )
             )
           } else if (edge.type == 4) {
-            const spline = edge as DwgSplineEdge
-            if (spline.numberOfControlPoints > 0 && spline.numberOfKnots > 0) {
-              const controlPoints: AcGePoint3dLike[] = spline.controlPoints.map(
-                item => {
-                  return {
-                    x: item.x,
-                    y: item.y,
-                    z: 0
-                  }
-                }
-              )
-              let hasWeights = true
-              const weights: number[] = spline.controlPoints.map(item => {
-                if (item.weight == null) hasWeights = false
-                return item.weight || 1
-              })
-              edges.push(
-                new AcGeSpline3d(
-                  controlPoints,
-                  spline.knots,
-                  hasWeights ? weights : undefined
-                )
-              )
-            } else if (spline.numberOfFitData > 0) {
-              const fitPoints: AcGePoint3dLike[] = spline.fitDatum.map(item => {
-                return {
-                  x: item.x,
-                  y: item.y,
-                  z: 0
-                }
-              })
-              edges.push(new AcGeSpline3d(fitPoints, 'Uniform'))
+            const splineEdge = AcGeSpline3d.fromDwgSplineEdge(
+              edge as DwgSplineEdge
+            )
+            if (splineEdge) {
+              edges.push(splineEdge)
             }
           }
         })
@@ -555,12 +675,37 @@ export class AcDbEntityConverter {
         }
       }
     })
+    // Handle gradient fill properties
+    // The meaning of gradientFlag is as follows.
+    // - 0: Solid hatch
+    // - 1: Gradient
+    if (hatch.gradientFlag) {
+      const gradientHatch = hatch as DwgGradientHatchEntity
+      dbEntity.hatchObjectType = AcDbHatchObjectType.GradientObject
+      dbEntity.gradientName = gradientHatch.gradientName
+      dbEntity.gradientAngle = gradientHatch.gradientRotation ?? 0
+      dbEntity.gradientShift = gradientHatch.gradientDefinition ?? 0
+      dbEntity.gradientOneColorMode = gradientHatch.gradientColorFlag == 1
+      dbEntity.shadeTintValue = gradientHatch.colorTint ?? 0
+      if (gradientHatch.gradientColors) {
+        const length = gradientHatch.gradientColors.length
+        if (length > 1) {
+          dbEntity.gradientStartColor = gradientHatch.gradientColors[0].rgb
+          dbEntity.gradientEndColor = gradientHatch.gradientColors[1].rgb
+        } else if (length > 0) {
+          dbEntity.gradientStartColor = gradientHatch.gradientColors[0].rgb
+        }
+      }
+    }
+    if (hatch.extrusionDirection) {
+      dbEntity.normal = hatch.extrusionDirection
+    }
     return dbEntity
   }
 
   private convertTable(table: DwgTableEntity) {
     const dbEntity = new AcDbTable(
-      table.name,
+      table.name ?? '',
       table.rowCount,
       table.columnCount
     )
@@ -596,12 +741,85 @@ export class AcDbEntityConverter {
     dbEntity.styleName = text.styleName
     dbEntity.height = text.textHeight
     dbEntity.position.copy(text.startPoint)
+    // Propagate DXF group 11 (alignment point) so non-default justifications
+    // place the text correctly. `endPoint` is libredwg's name for the
+    // alignment point on a TEXT entity. Fall back to startPoint when group
+    // 11 is missing or surfaces as the zero point ??see comment in
+    // `convertAttributeCommon`.
+    const isEndPointZero =
+      !text.endPoint ||
+      (text.endPoint.x === 0 &&
+        text.endPoint.y === 0 &&
+        ((text.endPoint as { z?: number }).z ?? 0) === 0)
+    if (text.endPoint && !isEndPointZero) {
+      dbEntity.alignmentPoint.copy(text.endPoint)
+      dbEntity.hasAlignmentPoint = true
+    } else {
+      dbEntity.alignmentPoint.copy(text.startPoint)
+      dbEntity.hasAlignmentPoint = false
+    }
     dbEntity.rotation = text.rotation
     dbEntity.oblique = text.obliqueAngle ?? 0
     dbEntity.thickness = text.thickness
     dbEntity.horizontalMode = text.halign as unknown as AcDbTextHorizontalMode
     dbEntity.verticalMode = text.valign as unknown as AcDbTextVerticalMode
     dbEntity.widthFactor = text.xScale ?? 1
+    return dbEntity
+  }
+
+  private convertArcAlignedText(entity: DwgArcAlignedTextEntity) {
+    const dbEntity = new AcDbArcAlignedText()
+    dbEntity.textString = entity.text
+    dbEntity.textSize = entity.textSize
+    dbEntity.xScale = entity.xScale > 0 ? entity.xScale : 1
+    dbEntity.characterSpacing = entity.characterSpacing
+    if (entity.styleName) dbEntity.styleName = entity.styleName
+    dbEntity.fontName = entity.fontName
+    dbEntity.bigFontName = entity.bigFontName
+    dbEntity.offsetFromArc = entity.offsetFromArc
+    dbEntity.rightOffset = entity.rightOffset
+    dbEntity.leftOffset = entity.leftOffset
+    dbEntity.center = new AcGePoint3d(
+      entity.center.x,
+      entity.center.y,
+      entity.center.z
+    )
+    dbEntity.radius = entity.radius
+    dbEntity.startAngle = entity.startAngle
+    dbEntity.endAngle = entity.endAngle
+    dbEntity.normal = new AcGeVector3d(
+      entity.extrusionDirection.x,
+      entity.extrusionDirection.y,
+      entity.extrusionDirection.z || 1
+    )
+    dbEntity.characterSet = entity.characterSet
+    dbEntity.pitchAndFamily = entity.pitchAndFamily
+    dbEntity.isShx = entity.isShx
+    dbEntity.isBold = entity.isBold
+    dbEntity.isItalic = entity.isItalic
+    dbEntity.isUnderlined = entity.isUnderlined
+    dbEntity.alignment = entity.alignment as AcDbArcAlignedText['alignment']
+    dbEntity.isReverse = entity.isReverse
+    dbEntity.wizardFlag = entity.wizardFlag
+    dbEntity.textPosition =
+      entity.textPosition as AcDbArcAlignedText['textPosition']
+    dbEntity.textDirection =
+      entity.textDirection as AcDbArcAlignedText['textDirection']
+    if (entity.arcHandle) dbEntity.arcId = entity.arcHandle
+    return dbEntity
+  }
+
+  private convertTolerance(tolerance: DwgToleranceEntity) {
+    const dbEntity = new AcDbFcf()
+    dbEntity.location.copy(tolerance.insertionPoint)
+    dbEntity.text = tolerance.text
+    dbEntity.dimensionStyle = tolerance.styleName ?? ''
+    if (tolerance.extrusionDirection) {
+      dbEntity.normal.copy(tolerance.extrusionDirection)
+    }
+    if (tolerance.xAxisDirection) {
+      dbEntity.direction.copy(tolerance.xAxisDirection)
+    }
     return dbEntity
   }
 
@@ -622,6 +840,15 @@ export class AcDbEntityConverter {
     }
     dbEntity.drawingDirection =
       mtext.drawingDirection as unknown as AcGiMTextFlowDirection
+    if (mtext.lineSpacing != null && mtext.lineSpacing > 0) {
+      dbEntity.lineSpacingFactor = mtext.lineSpacing
+    }
+    if (mtext.lineSpacingStyle != null) {
+      dbEntity.lineSpacingStyle = mtext.lineSpacingStyle
+    }
+    if (mtext.extentsWidth != null && mtext.extentsWidth > 0) {
+      dbEntity.extentsWidth = mtext.extentsWidth
+    }
     return dbEntity
   }
 
@@ -632,20 +859,395 @@ export class AcDbEntityConverter {
     })
     dbEntity.hasArrowHead = leader.isArrowheadEnabled
     dbEntity.hasHookLine = leader.isHooklineExists
+    dbEntity.isHookLineSameDirection = leader.isHooklineSameDirection
     dbEntity.isSplined = leader.isSpline
-    dbEntity.dimensionStyle = leader.styleName
+    dbEntity.dimensionStyle = leader.styleName ?? ''
     dbEntity.annoType =
       leader.leaderCreationFlag as unknown as AcDbLeaderAnnotationType
+    if (leader.textHeight != null) dbEntity.textHeight = leader.textHeight
+    if (leader.textWidth != null) dbEntity.textWidth = leader.textWidth
+    if (leader.byBlockColor != null) dbEntity.byBlockColor = leader.byBlockColor
+    if (leader.associatedAnnotation) {
+      dbEntity.associatedAnnotation = leader.associatedAnnotation
+    }
+    if (leader.normal) dbEntity.normal = leader.normal
+    if (leader.horizontalDirection) {
+      dbEntity.horizontalDirection = leader.horizontalDirection
+    }
+    if (leader.offsetFromBlock)
+      dbEntity.offsetFromBlock = leader.offsetFromBlock
+    if (leader.offsetFromAnnotation) {
+      dbEntity.offsetFromAnnotation = leader.offsetFromAnnotation
+    }
+    return dbEntity
+  }
+
+  private convertMLine(mline: DwgMLineEntity) {
+    const dbEntity = new AcDbMLine()
+
+    dbEntity.styleName = mline.mlineStyle || 'STANDARD'
+    dbEntity.scale = mline.scale
+    dbEntity.flags = mline.flags
+    dbEntity.justification =
+      mline.justification as unknown as AcDbMLineJustification
+    dbEntity.startPosition = mline.startPoint
+    dbEntity.normal = mline.extrusionDirection ?? AcGeVector3d.Z_AXIS
+    dbEntity.styleCount = mline.numberOfLines ?? 0
+
+    dbEntity.segments = (mline.vertices ?? []).map(vertex => ({
+      position: vertex.vertex,
+      direction: vertex.vertexDirection,
+      miterDirection: vertex.miterDirection,
+      elements: (vertex.lines ?? []).map(line => ({
+        parameterCount: line.numberOfSegmentParams,
+        parameters: line.segmentParams ?? [],
+        fillCount: line.numberOfAreaFillParams,
+        fillParameters: line.areaFillParams ?? []
+      }))
+    }))
+
+    return dbEntity
+  }
+
+  private convertMLeader(mleader: DwgMultiLeaderEntity) {
+    const dbEntity = new AcDbMLeader()
+    const raw = mleader as DwgMultiLeaderEntity & Record<string, unknown>
+
+    dbEntity.version = mleader.version
+    dbEntity.leaderStyleId = mleader.leaderStyleId
+    if (mleader.leaderStyleId) dbEntity.mleaderStyleId = mleader.leaderStyleId
+    dbEntity.propertyOverrideFlag = mleader.propertyOverrideFlag
+    dbEntity.leaderLineType = (mleader.leaderLineType ??
+      AcDbMLeaderLineType.StraightLeader) as AcDbMLeaderLineType
+    if (mleader.leaderLineColor != null) {
+      dbEntity.leaderLineColor = this.convertMLeaderEntityColor(
+        mleader.leaderLineColor
+      )
+    }
+    dbEntity.leaderLineTypeId = mleader.leaderLineTypeId
+    dbEntity.leaderLineWeight = mleader.leaderLineWeight
+    dbEntity.landingEnabled = mleader.landingEnabled
+    dbEntity.doglegEnabled = mleader.doglegEnabled ?? false
+    dbEntity.doglegLength = mleader.doglegLength ?? 0
+    dbEntity.arrowheadId = mleader.arrowheadId
+    dbEntity.arrowheadSize = mleader.arrowheadSize
+    dbEntity.textStyleId = mleader.textStyleId
+    dbEntity.textLeftAttachmentType = mleader.textLeftAttachmentType
+    dbEntity.textRightAttachmentType = mleader.textRightAttachmentType
+    dbEntity.textAngleType = mleader.textAngleType
+    dbEntity.textAlignmentType = mleader.textAlignmentType
+    if (mleader.textColor != null) {
+      dbEntity.textColor = this.convertMLeaderEntityColor(mleader.textColor)
+    }
+    dbEntity.textFrameEnabled = mleader.textFrameEnabled
+    dbEntity.landingGap = mleader.landingGap
+    dbEntity.textAttachment = mleader.textAttachment
+    dbEntity.textFlowDirection = mleader.textFlowDirection
+    if (this.isValidHandleId(mleader.blockContentId)) {
+      dbEntity.blockContentId = mleader.blockContentId
+    }
+    if (mleader.blockContentColor != null) {
+      dbEntity.blockContentColor = this.convertMLeaderEntityColor(
+        mleader.blockContentColor
+      )
+    }
+    dbEntity.blockContentRotation = mleader.blockContentRotation
+    dbEntity.blockContentConnectionType = mleader.blockContentConnectionType
+    dbEntity.annotativeScaleEnabled = mleader.annotativeScaleEnabled
+    dbEntity.arrowheadOverrides = mleader.arrowheadOverrides
+      ? mleader.arrowheadOverrides.map(
+          (item: { index: number; handle: string }) => ({ ...item })
+        )
+      : []
+    dbEntity.blockAttributes = mleader.blockAttributes
+      ? mleader.blockAttributes.map(
+          (item: {
+            id?: string
+            index?: number
+            width?: number
+            text?: string
+          }) => ({ ...item })
+        )
+      : []
+    dbEntity.textDirectionNegative = mleader.textDirectionNegative
+    dbEntity.textAlignInIPE = mleader.textAlignInIPE
+    dbEntity.bottomTextAttachmentDirection =
+      mleader.bottomTextAttachmentDirection
+    dbEntity.topTextAttachmentDirection = mleader.topTextAttachmentDirection
+    dbEntity.contentScale = mleader.contentScale
+    dbEntity.textLineSpacingStyle = mleader.textLineSpacingStyle
+    if (mleader.textBackgroundColor != null) {
+      dbEntity.textBackgroundColor = this.convertMLeaderEntityColor(
+        mleader.textBackgroundColor
+      )
+    }
+    dbEntity.textBackgroundScaleFactor = mleader.textBackgroundScaleFactor
+    dbEntity.textBackgroundTransparency = mleader.textBackgroundTransparency
+    dbEntity.textBackgroundColorOn = mleader.textBackgroundColorOn
+    dbEntity.textFillOn = mleader.textFillOn
+    dbEntity.textColumnType = mleader.textColumnType
+    dbEntity.textUseAutoHeight = mleader.textUseAutoHeight
+    dbEntity.textColumnWidth = mleader.textColumnWidth
+    dbEntity.textColumnGutterWidth = mleader.textColumnGutterWidth
+    dbEntity.textColumnFlowReversed = mleader.textColumnFlowReversed
+    dbEntity.textColumnHeight = mleader.textColumnHeight
+    dbEntity.textUseWordBreak = mleader.textUseWordBreak
+    dbEntity.hasMText = mleader.hasMText
+    dbEntity.hasBlock = mleader.hasBlock
+    dbEntity.planeNormalReversed = mleader.planeNormalReversed
+
+    if (mleader.blockContentScale) {
+      dbEntity.blockContentScale = new AcGeVector3d(mleader.blockContentScale)
+    }
+    if (mleader.contentBasePosition) {
+      dbEntity.contentBasePosition = new AcGePoint3d().copy(
+        mleader.contentBasePosition
+      )
+    }
+    if (mleader.textAnchor) {
+      dbEntity.textAnchor = new AcGePoint3d().copy(mleader.textAnchor)
+    }
+    if (mleader.planeOrigin) {
+      dbEntity.planeOrigin = new AcGePoint3d().copy(mleader.planeOrigin)
+    }
+    if (mleader.planeXAxisDirection) {
+      dbEntity.planeXAxisDirection = new AcGeVector3d(
+        mleader.planeXAxisDirection
+      )
+    }
+    if (mleader.planeYAxisDirection) {
+      dbEntity.planeYAxisDirection = new AcGeVector3d(
+        mleader.planeYAxisDirection
+      )
+    }
+
+    const rawTextContent = raw.textContent as unknown
+    const rawTextContentRecord =
+      rawTextContent && typeof rawTextContent === 'object'
+        ? (rawTextContent as Record<string, unknown>)
+        : undefined
+    const hasMTextContent =
+      (typeof rawTextContent === 'string' && rawTextContent.length > 0) ||
+      this.readString(rawTextContentRecord ?? {}, ['text', 'contents']) !=
+        null ||
+      this.readString(raw, ['text', 'contents', 'mtext']) != null
+
+    const contentType =
+      mleader.contentType ??
+      (hasMTextContent
+        ? AcDbMLeaderContentType.MTextContent
+        : mleader.blockContent
+          ? AcDbMLeaderContentType.BlockContent
+          : AcDbMLeaderContentType.NoneContent)
+    dbEntity.contentType = contentType as AcDbMLeaderContentType
+
+    const normal = this.readPoint(raw, ['normal', 'extrusionDirection'])
+    if (normal) dbEntity.normal = normal
+
+    const textStyleName =
+      this.readString(rawTextContentRecord ?? {}, [
+        'styleName',
+        'textStyleName',
+        'textStyle'
+      ]) ?? this.readString(raw, ['textStyleName', 'textStyle', 'styleName'])
+    if (textStyleName) dbEntity.textStyleName = textStyleName
+
+    const textHeight =
+      this.readPositiveNumber(rawTextContentRecord ?? {}, [
+        'textHeight',
+        'height'
+      ]) ??
+      this.readPositiveNumber(raw, [
+        'textHeight',
+        'mtextHeight',
+        'textContentHeight'
+      ]) ??
+      this.readPositiveNumber(raw, ['arrowheadSize', 'contentScale'])
+    if (textHeight != null) dbEntity.textHeight = textHeight
+
+    const textWidth =
+      this.readPositiveNumber(rawTextContentRecord ?? {}, [
+        'textWidth',
+        'width'
+      ]) ??
+      this.readPositiveNumber(raw, [
+        'textWidth',
+        'mtextWidth',
+        'textContentWidth'
+      ])
+    if (textWidth != null) dbEntity.textWidth = textWidth
+    dbEntity.textLineSpacingFactor =
+      this.readNumber(rawTextContentRecord ?? {}, [
+        'lineSpacingFactor',
+        'textLineSpacingFactor'
+      ]) ??
+      this.readNumber(raw, ['textLineSpacingFactor']) ??
+      dbEntity.textLineSpacingFactor
+    const textLineSpacingStyle =
+      this.readNumber(rawTextContentRecord ?? {}, [
+        'lineSpacingStyle',
+        'textLineSpacingStyle'
+      ]) ?? this.readNumber(raw, ['textLineSpacingStyle'])
+    if (textLineSpacingStyle != null) {
+      dbEntity.textLineSpacingStyle = textLineSpacingStyle
+    }
+    const textRotation =
+      this.readNumber(rawTextContentRecord ?? {}, [
+        'textRotation',
+        'rotation'
+      ]) ??
+      this.readNumber(raw, [
+        'textRotation',
+        'mtextRotation',
+        'textContentRotation'
+      ])
+    if (textRotation != null) {
+      dbEntity.textRotation = textRotation
+    }
+
+    const textDirection = this.readPoint(raw, [
+      'textDirection',
+      'mtextDirection',
+      'textDirectionVector'
+    ])
+    if (textDirection) dbEntity.textDirection = textDirection
+
+    const textAttachmentPoint = this.readNumber(raw, [
+      'textAttachmentPoint',
+      'attachmentPoint'
+    ])
+    if (textAttachmentPoint != null && textAttachmentPoint !== 0) {
+      dbEntity.textAttachmentPoint =
+        textAttachmentPoint as unknown as AcGiMTextAttachmentPoint
+    }
+
+    const textAttachmentDirection = mleader.textAttachmentDirection
+    if (textAttachmentDirection != null) {
+      dbEntity.textAttachmentDirection =
+        textAttachmentDirection as unknown as AcDbMLeaderTextAttachmentDirection
+    }
+
+    const textDrawingDirection = this.readNumber(raw, [
+      'textDrawingDirection',
+      'drawingDirection'
+    ])
+    if (textDrawingDirection != null) {
+      dbEntity.textDrawingDirection =
+        textDrawingDirection as unknown as AcGiMTextFlowDirection
+    }
+
+    const text =
+      typeof rawTextContent === 'string'
+        ? rawTextContent
+        : (this.readString(rawTextContentRecord ?? {}, ['text', 'contents']) ??
+          this.readString(raw, ['text', 'contents', 'mtext']))
+    const anchorPoint =
+      this.readPoint(rawTextContentRecord ?? {}, [
+        'anchorPoint',
+        'textAnchor',
+        'textLocation',
+        'textPosition',
+        'textAnchorPoint'
+      ]) ??
+      this.readPoint(raw, [
+        'textAnchor',
+        'textLocation',
+        'textPosition',
+        'textAnchorPoint',
+        'contentBasePosition'
+      ])
+    if (text != null && anchorPoint) {
+      dbEntity.mtextContent = { text, anchorPoint }
+    }
+
+    if (mleader.blockContent) {
+      const blockRecord = mleader.blockContent as unknown as Record<
+        string,
+        unknown
+      >
+      const blockContentId = mleader.blockContent.blockContentId
+      if (this.isValidHandleId(blockContentId)) {
+        const rawBlockColor = this.readMLeaderEntityColor(blockRecord, [
+          'color'
+        ])
+        dbEntity.blockContent = {
+          blockContentId,
+          normal: this.readPoint(blockRecord, ['normal']),
+          position: mleader.blockContent.position,
+          scale: this.readPoint(blockRecord, ['scale']),
+          rotation: this.readNumber(blockRecord, ['rotation']),
+          color: rawBlockColor,
+          transformationMatrix: Array.isArray(
+            mleader.blockContent.transformationMatrix
+          )
+            ? mleader.blockContent.transformationMatrix
+            : []
+        }
+      }
+    } else if (this.isValidHandleId(mleader.blockContentId)) {
+      dbEntity.blockContent = {
+        blockContentId: mleader.blockContentId,
+        scale: mleader.blockContentScale,
+        rotation: mleader.blockContentRotation,
+        color: dbEntity.blockContentColor,
+        transformationMatrix: []
+      }
+    }
+
+    this.readMLeaderLeaders(raw)?.forEach(leader => {
+      dbEntity.addLeader({
+        lastLeaderLinePoint: leader.lastLeaderLinePoint,
+        lastLeaderLinePointSet: leader.lastLeaderLinePointSet,
+        doglegVector: leader.doglegVector,
+        doglegVectorSet: leader.doglegVectorSet,
+        doglegLength: leader.doglegLength ?? mleader.doglegLength,
+        breaks: leader.breaks,
+        leaderBranchIndex: leader.leaderBranchIndex,
+        leaderLines: leader.leaderLines
+      })
+    })
+
+    if (dbEntity.numberOfLeaders === 0) {
+      this.readLeaderLineArray(raw)?.forEach(line => {
+        dbEntity.addLeader({
+          doglegLength: mleader.doglegLength
+        })
+        dbEntity.addLeaderLine(dbEntity.numberOfLeaders - 1, line)
+      })
+    }
+
+    if (dbEntity.numberOfLeaders === 0 && mleader.contentBasePosition) {
+      dbEntity.addLeader({
+        lastLeaderLinePoint: mleader.contentBasePosition,
+        lastLeaderLinePointSet: true,
+        doglegLength: mleader.doglegLength
+      })
+    }
+
     return dbEntity
   }
 
   private convertDimension(dimension: DwgDimensionEntityCommon) {
-    if (
-      dimension.subclassMarker == 'AcDbAlignedDimension' ||
-      dimension.subclassMarker == 'AcDbRotatedDimension'
-    ) {
+    if (dimension.subclassMarker == 'AcDbAlignedDimension') {
       const entity = dimension as DwgAlignedDimensionEntity
       const dbEntity = new AcDbAlignedDimension(
+        entity.subDefinitionPoint1,
+        entity.subDefinitionPoint2,
+        entity.definitionPoint
+      )
+      if (entity.insertionPoint) {
+        dbEntity.dimBlockPosition = {
+          x: entity.insertionPoint.x,
+          y: entity.insertionPoint.y,
+          z: 0
+        }
+      }
+      dbEntity.rotation = entity.rotationAngle
+      this.processDimensionCommonAttrs(dimension, dbEntity)
+      return dbEntity
+    } else if (dimension.subclassMarker == 'AcDbRotatedDimension') {
+      const entity = dimension as DwgAlignedDimensionEntity
+      const dbEntity = new AcDbRotatedDimension(
         entity.subDefinitionPoint1,
         entity.subDefinitionPoint2,
         entity.definitionPoint
@@ -667,6 +1269,32 @@ export class AcDbEntityConverter {
         entity.subDefinitionPoint1,
         entity.subDefinitionPoint2,
         entity.definitionPoint
+      )
+      this.processDimensionCommonAttrs(dimension, dbEntity)
+      return dbEntity
+    } else if (dimension.subclassMarker == 'AcDb2LineAngularDimension') {
+      const entity = dimension as DwgAngularDimensionEntity & {
+        arcPoint?: DwgAngularDimensionEntity['arcPoint']
+      }
+      const arcPoint =
+        entity.definitionPoint ?? entity.arcPoint ?? entity.subDefinitionPoint2
+      const vertexPoint =
+        entity.centerPoint ??
+        entity.subDefinitionPoint2 ??
+        entity.subDefinitionPoint1
+      const centerPoint = vertexPoint ?? arcPoint
+      const subDefinitionPoint1 =
+        entity.subDefinitionPoint1 ?? vertexPoint ?? arcPoint
+      const subDefinitionPoint2 =
+        entity.subDefinitionPoint2 ?? vertexPoint ?? arcPoint
+      if (!arcPoint || !entity.name) {
+        return null
+      }
+      const dbEntity = new AcDb3PointAngularDimension(
+        centerPoint,
+        subDefinitionPoint1,
+        subDefinitionPoint2,
+        arcPoint
       )
       this.processDimensionCommonAttrs(dimension, dbEntity)
       return dbEntity
@@ -711,9 +1339,9 @@ export class AcDbEntityConverter {
     dbImage.imageSize.copy(image.imageSize)
     dbImage.imageDefId = image.imageDefHandle as string
     dbImage.isClipped = image.clipping > 0
-    dbImage.isShownClipped = (image.flags | 0x0004) > 0
-    dbImage.isImageShown = (image.flags | 0x0003) > 0
-    dbImage.isImageTransparent = (image.flags | 0x0008) > 0
+    dbImage.isShownClipped = (image.flags & 0x0004) !== 0
+    dbImage.isImageShown = (image.flags & 0x0003) !== 0
+    dbImage.isImageTransparent = (image.flags & 0x0008) !== 0
     image.clippingBoundaryPath.forEach(point => {
       dbImage.clipBoundary.push(new AcGePoint2d(point))
     })
@@ -747,6 +1375,39 @@ export class AcDbEntityConverter {
     return dbWipeout
   }
 
+  private convertOleFrame(entity: DwgOleFrameEntity) {
+    const dbEntity = new AcDbOleFrame()
+    dbEntity.oleVersion = entity.flag ?? 0
+    if (entity.binaryData) {
+      const bytes = acdbHexStringsToBytes([entity.binaryData])
+      dbEntity.loadOleObjectFromDxf(entity.dataSize, bytes)
+    }
+    return dbEntity
+  }
+
+  private convertOle2Frame(entity: DwgOle2FrameEntity) {
+    const dbEntity = new AcDbOle2Frame()
+    dbEntity.oleVersion = entity.oleVersion ?? 0
+    dbEntity.userType = entity.oleClient ?? ''
+    if (entity.leftUpPoint) {
+      dbEntity.upperLeftCorner.copy(entity.leftUpPoint)
+    }
+    if (entity.rightDownPoint) {
+      dbEntity.lowerRightCorner.copy(entity.rightDownPoint)
+    }
+    dbEntity.setLockAspect(entity.lockAspect ?? 0)
+    dbEntity.oleObjectType =
+      (entity.oleObjectType as AcDbOleObjectType) ?? AcDbOleObjectType.Embedded
+    dbEntity.tileMode =
+      (entity.tileModeDescriptor as AcDbOleTileMode) ??
+      AcDbOleTileMode.ModelSpace
+    if (entity.binaryData) {
+      const bytes = acdbHexStringsToBytes([entity.binaryData])
+      dbEntity.loadOleObjectFromDxf(entity.dataSize, bytes)
+    }
+    return dbEntity
+  }
+
   private convertViewport(viewport: DwgViewportEntity) {
     const dbViewport = new AcDbViewport()
     dbViewport.number = viewport.viewportId
@@ -755,6 +1416,31 @@ export class AcDbEntityConverter {
     dbViewport.width = viewport.width
     dbViewport.viewCenter.copy(viewport.displayCenter)
     dbViewport.viewHeight = viewport.viewHeight
+    if (viewport.targetPoint) {
+      dbViewport.viewTarget.copy(viewport.targetPoint)
+    }
+    if (viewport.viewTwistAngle != null) {
+      dbViewport.viewTwistAngle = viewport.viewTwistAngle
+    }
+
+    // LibreDWG sometimes leaves the default paper-space viewport's paper
+    // center at (0,0) while displayCenter still holds the sheet-local
+    // center. Repair that so downstream default detection
+    // (centerPoint == viewCenter) and zoom bounds stay on the sheet.
+    const eps = 1e-6
+    const centerAtOrigin =
+      Math.abs(dbViewport.centerPoint.x) < eps &&
+      Math.abs(dbViewport.centerPoint.y) < eps
+    const target = dbViewport.viewTarget
+    const targetAtOrigin = Math.abs(target.x) < eps && Math.abs(target.y) < eps
+    const oneToOne =
+      Number.isFinite(dbViewport.height) &&
+      Number.isFinite(dbViewport.viewHeight) &&
+      Math.abs(dbViewport.viewHeight - dbViewport.height) < eps
+    if (centerAtOrigin && targetAtOrigin && oneToOne) {
+      dbViewport.centerPoint.copy(dbViewport.viewCenter)
+    }
+
     return dbViewport
   }
 
@@ -781,6 +1467,28 @@ export class AcDbEntityConverter {
     dbAttrib.styleName = text.styleName
     dbAttrib.height = text.textHeight
     dbAttrib.position.copy(text.startPoint)
+    // Propagate the alignment point (DXF group 11). It is meaningful only
+    // when halign/valign deviate from Left/Baseline, but we always copy it
+    // so DXF round-trip preserves the original value. Prefer the dedicated
+    // field on the parent entity (3D for ATTRIB, 2D for ATTDEF); fall back
+    // to the embedded text's `endPoint` which carries the same information.
+    // libredwg sometimes surfaces a zero point for entities that simply
+    // omit group 11 in the source DWG ??fall back to startPoint so the
+    // alignment anchor never collapses to the world origin and is always
+    // moved consistently with the position by `transformBy`.
+    const alignmentPoint = attrib.alignmentPoint ?? text.endPoint
+    const isAlignmentPointZero =
+      !alignmentPoint ||
+      (alignmentPoint.x === 0 &&
+        alignmentPoint.y === 0 &&
+        ((alignmentPoint as { z?: number }).z ?? 0) === 0)
+    if (alignmentPoint && !isAlignmentPointZero) {
+      dbAttrib.alignmentPoint.copy(alignmentPoint)
+      dbAttrib.hasAlignmentPoint = true
+    } else {
+      dbAttrib.alignmentPoint.copy(text.startPoint)
+      dbAttrib.hasAlignmentPoint = false
+    }
     dbAttrib.rotation = text.rotation
     dbAttrib.oblique = text.obliqueAngle ?? 0
     dbAttrib.thickness = text.thickness
@@ -823,10 +1531,40 @@ export class AcDbEntityConverter {
     dbBlockReference.scaleFactors.z = blockReference.zScale
     dbBlockReference.rotation = blockReference.rotation
     dbBlockReference.normal.copy(blockReference.extrusionDirection)
+    // MINSERT array parameters (libredwg fills these for TYPE_MINSERT /
+    // multi-column INSERT). Without them every array collapses to 1×1 and
+    // large floor-plan drawings look massively incomplete vs DXF.
+    if (blockReference.columnCount != null) {
+      dbBlockReference.columnCount = blockReference.columnCount
+    }
+    if (blockReference.rowCount != null) {
+      dbBlockReference.rowCount = blockReference.rowCount
+    }
+    if (blockReference.columnSpacing != null) {
+      dbBlockReference.columnSpacing = blockReference.columnSpacing
+    }
+    if (blockReference.rowSpacing != null) {
+      dbBlockReference.rowSpacing = blockReference.rowSpacing
+    }
+    // Pre-assign the BlockReference's objectId from the DWG handle so that
+    // `appendAttributes` below (which sets `attrib.ownerId = this.objectId`)
+    // produces a valid ownerId pointing at this INSERT, matching ObjectARX
+    // semantics. Without this, ownerId would be assigned undefined here and
+    // only later when `processCommonAttrs` runs on the returned BlockReference.
+    if (blockReference.handle != null) {
+      dbBlockReference.objectId = blockReference.handle
+    }
     if (blockReference.attribs) {
       blockReference.attribs.forEach(attrib => {
-        const dbAttrib = this.convertAttribute(attrib)
-        dbBlockReference.appendAttributes(dbAttrib)
+        // Route through `convert()` rather than `convertAttribute()` so
+        // `processCommonAttrs` runs and the AcDbAttribute receives its
+        // layer / color / objectId / lineType / lineWeight / linetypeScale
+        // from the DWG. Without this, ATTRIBs render with default styling
+        // and cannot be addressed individually by per-layer toggles.
+        const dbAttrib = this.convert(attrib)
+        if (dbAttrib instanceof AcDbAttribute) {
+          dbBlockReference.appendAttributes(dbAttrib)
+        }
       })
     }
     return dbBlockReference
@@ -854,7 +1592,18 @@ export class AcDbEntityConverter {
   private processCommonAttrs(entity: DwgEntity, dbEntity: AcDbEntity) {
     dbEntity.layer = entity.layer || '0'
     dbEntity.objectId = entity.handle
-    dbEntity.ownerId = entity.ownerBlockRecordSoftId
+    if (entity.ownerBlockRecordSoftId != null) {
+      dbEntity.ownerId = entity.ownerBlockRecordSoftId
+    }
+    const xdict = acdbNormalizeExtensionDictionaryId(
+      (entity as { extensionDictionary?: string }).extensionDictionary ??
+        entity.ownerDictionaryHardId ??
+        entity.ownerDictionarySoftId
+    )
+    if (xdict) {
+      dbEntity.extensionDictionary = xdict
+    }
+    this.applyExtendedData(entity, dbEntity)
     if (entity.lineType != null) {
       dbEntity.lineType = entity.lineType
     }
@@ -864,14 +1613,38 @@ export class AcDbEntityConverter {
     if (entity.lineTypeScale != null) {
       dbEntity.linetypeScale = entity.lineTypeScale
     }
-    if (entity.color != null) {
-      dbEntity.color.setRGBValue(entity.color)
-    }
-    if (entity.colorIndex != null) {
-      dbEntity.color.colorIndex = entity.colorIndex
-    }
-    if (entity.colorName) {
-      dbEntity.color.colorName = entity.colorName
+    // Build the entity color in a fresh AcCmColor and assign it via the
+    // setter. The previous pattern (`dbEntity.color.<prop> = ??) read the
+    // getter and mutated the result, which works for entities whose getter
+    // returns the cached `_color` field but breaks for entities like
+    // AcDbHatch that override the getter to return a clone of an HPCOLOR /
+    // CECOLOR fallback (PR #78). Mutations on a clone are dropped, leaving
+    // the entity stuck on the sysvar default and losing the DWG's RGB.
+    if (entity.color != null || entity.colorIndex != null || entity.colorName) {
+      const color = new AcCmColor()
+      if (entity.color != null) {
+        color.setRGBValue(entity.color)
+      }
+      if (entity.colorIndex != null) {
+        // ACI color precedence rule:
+        // - If the libredwg binding already resolved a concrete RGB for
+        //   the entity (entity.color != null), that RGB reflects the
+        //   DWG's own color table ??trust it and do NOT overwrite with
+        //   ACI resolution from our default palette (which loses custom
+        //   palette mappings, e.g. ACI 254 ??#d8f5c2 in the source DWG
+        //   vs. near-black in our default palette).
+        // - Exception: colorIndex === 7 is semantically special (the
+        //   "foreground" color that flips with COLORTHEME). Preserve it
+        //   as ByACI(7) so that AcCmColor.isForeground stays true and
+        //   text keeps inverting with the theme.
+        if (entity.color == null || entity.colorIndex === 7) {
+          color.colorIndex = entity.colorIndex
+        }
+      }
+      if (entity.colorName) {
+        color.colorName = entity.colorName
+      }
+      dbEntity.color = color
     }
     if (entity.isVisible != null) {
       dbEntity.visibility = entity.isVisible
@@ -884,5 +1657,296 @@ export class AcDbEntityConverter {
       }
       dbEntity.transparency = transparency
     }
+  }
+
+  private applyExtendedData(entity: DwgEntity, dbEntity: AcDbEntity) {
+    const xdataList = entity.xdata
+    if (!xdataList) return
+    const blocks = Array.isArray(xdataList) ? xdataList : [xdataList]
+    for (const block of blocks) {
+      if (!block?.appName) continue
+      const values: Array<{ code: number; value: unknown }> = [
+        {
+          code: AcDbDxfCode.ExtendedDataRegAppName,
+          value: block.appName
+        }
+      ]
+      for (const entry of block.value ?? []) {
+        if (entry == null) continue
+        if (typeof entry === 'object' && 'code' in entry && 'value' in entry) {
+          const code = Number(entry.code)
+          const value = entry.value
+          if (
+            code === AcDbDxfCode.ExtendedDataHandle ||
+            (code >= 1000 && code <= 1071)
+          ) {
+            const normalized = this.normalizeXDataValue(code, value)
+            if (normalized !== undefined) {
+              values.push({ code, value: normalized })
+            }
+          }
+        }
+      }
+      dbEntity.setImportedXData(values as never)
+    }
+  }
+
+  /**
+   * Preserve XData point objects and binary chunks so DXF export can emit
+   * numeric 1010/1020/1030 triples and hex 1004 data instead of
+   * "[object Object]" / invalid binary strings.
+   */
+  private normalizeXDataValue(code: number, value: unknown): unknown {
+    if (code >= 1010 && code <= 1013) {
+      if (this.isPointLike(value)) {
+        return {
+          x: value.x,
+          y: value.y,
+          z: typeof value.z === 'number' ? value.z : 0
+        }
+      }
+      if (
+        Array.isArray(value) &&
+        typeof value[0] === 'number' &&
+        typeof value[1] === 'number'
+      ) {
+        return {
+          x: value[0],
+          y: value[1],
+          z: typeof value[2] === 'number' ? value[2] : 0
+        }
+      }
+      if (typeof value === 'number' && Number.isFinite(value)) return value
+    }
+
+    if (code === AcDbDxfCode.ExtendedDataBinaryChunk) {
+      if (value instanceof Uint8Array) return value
+      if (value instanceof ArrayBuffer) return new Uint8Array(value)
+      if (typeof value === 'string') return value
+      if (
+        Array.isArray(value) &&
+        value.every(
+          (n) =>
+            typeof n === 'number' && Number.isFinite(n) && n >= 0 && n <= 255
+        )
+      ) {
+        return Uint8Array.from(value as number[])
+      }
+      return undefined
+    }
+
+    if (
+      typeof value === 'string' ||
+      typeof value === 'number' ||
+      typeof value === 'boolean'
+    ) {
+      return value
+    }
+    if (value instanceof Uint8Array) return value
+    if (this.isPointLike(value)) {
+      return {
+        x: value.x,
+        y: value.y,
+        z: typeof value.z === 'number' ? value.z : 0
+      }
+    }
+    // Avoid String(object) → "[object Object]" in DXF.
+    return undefined
+  }
+
+  private convertMLeaderEntityColor(color: number) {
+    return acdbDecodeMLeaderStyleRawColor(color)
+  }
+
+  private readMLeaderEntityColor(
+    source: Record<string, unknown>,
+    names: string[]
+  ) {
+    for (const name of names) {
+      const value = source[name]
+      if (typeof value === 'number' && Number.isFinite(value)) {
+        return acdbDecodeMLeaderStyleRawColor(value)
+      }
+    }
+    return undefined
+  }
+
+  private isValidHandleId(id: string | undefined): id is string {
+    return id != null && id !== '' && id !== '0'
+  }
+
+  private readNumber(source: Record<string, unknown>, names: string[]) {
+    for (const name of names) {
+      const value = source[name]
+      if (typeof value === 'number' && Number.isFinite(value)) return value
+    }
+    return undefined
+  }
+
+  private readPositiveNumber(source: Record<string, unknown>, names: string[]) {
+    const value = this.readNumber(source, names)
+    return value != null && value > 0 ? value : undefined
+  }
+
+  private readString(source: Record<string, unknown>, names: string[]) {
+    for (const name of names) {
+      const value = source[name]
+      if (typeof value === 'string') return value
+    }
+    return undefined
+  }
+
+  private readBoolean(source: Record<string, unknown>, names: string[]) {
+    for (const name of names) {
+      const value = source[name]
+      if (typeof value === 'boolean') return value
+      if (typeof value === 'number') return value !== 0
+    }
+    return undefined
+  }
+
+  private readPoint(source: Record<string, unknown>, names: string[]) {
+    for (const name of names) {
+      const value = source[name]
+      if (this.isPointLike(value)) return value
+      if (
+        Array.isArray(value) &&
+        typeof value[0] === 'number' &&
+        typeof value[1] === 'number'
+      ) {
+        return { x: value[0], y: value[1], z: value[2] ?? 0 }
+      }
+    }
+    return undefined
+  }
+
+  private readLeaderLineArray(source: Record<string, unknown>) {
+    const leaderLines = source.leaderLines
+    if (Array.isArray(leaderLines)) {
+      return leaderLines
+        .map(line => {
+          if (!line || typeof line !== 'object') return undefined
+          const vertices = (line as Record<string, unknown>).vertices
+          return Array.isArray(vertices)
+            ? vertices.filter(point => this.isPointLike(point))
+            : undefined
+        })
+        .filter((line): line is AcGePoint3dLike[] => !!line && line.length > 0)
+    }
+
+    const vertices = source.vertices
+    if (Array.isArray(vertices)) {
+      const line = vertices.filter(point => this.isPointLike(point))
+      return line.length > 0 ? [line] : undefined
+    }
+    return undefined
+  }
+
+  private readMLeaderLeaders(
+    source: Record<string, unknown>
+  ): ParsedMLeaderLeader[] | undefined {
+    const leaders = source.leaderSections
+    if (!Array.isArray(leaders)) return undefined
+
+    const dbLeaders: ParsedMLeaderLeader[] = []
+    leaders.forEach(leader => {
+      if (!leader || typeof leader !== 'object') return
+      const leaderRecord = leader as Record<string, unknown>
+      const leaderLines = leaderRecord.leaderLines
+      const lines: ParsedMLeaderLine[] | undefined = Array.isArray(leaderLines)
+        ? leaderLines.reduce<ParsedMLeaderLine[]>((result, line) => {
+            const dbLine = this.readMLeaderLine(line)
+            if (dbLine) result.push(dbLine)
+            return result
+          }, [])
+        : undefined
+
+      const dbLeader: ParsedMLeaderLeader = {}
+      const lastLeaderLinePoint = this.readPoint(leaderRecord, [
+        'lastLeaderLinePoint'
+      ])
+      const doglegVector = this.readPoint(leaderRecord, ['doglegVector'])
+      const doglegLength = this.readNumber(leaderRecord, ['doglegLength'])
+      const leaderBreaks = this.readMLeaderBreaks(leaderRecord.breaks)
+      const leaderBranchIndex = this.readNumber(leaderRecord, [
+        'leaderBranchIndex'
+      ])
+      if (lastLeaderLinePoint)
+        dbLeader.lastLeaderLinePoint = lastLeaderLinePoint
+      if (leaderRecord.lastLeaderLinePointSet != null) {
+        dbLeader.lastLeaderLinePointSet = this.readBoolean(leaderRecord, [
+          'lastLeaderLinePointSet'
+        ])
+      }
+      if (doglegVector) dbLeader.doglegVector = doglegVector
+      if (leaderRecord.doglegVectorSet != null) {
+        dbLeader.doglegVectorSet = this.readBoolean(leaderRecord, [
+          'doglegVectorSet'
+        ])
+      }
+      if (doglegLength != null) dbLeader.doglegLength = doglegLength
+      if (leaderBreaks) dbLeader.breaks = leaderBreaks
+      if (leaderBranchIndex != null) {
+        dbLeader.leaderBranchIndex = leaderBranchIndex
+      }
+      if (lines) dbLeader.leaderLines = lines
+      dbLeaders.push(dbLeader)
+    })
+    return dbLeaders
+  }
+
+  private readMLeaderLine(value: unknown): ParsedMLeaderLine | undefined {
+    if (!value || typeof value !== 'object') return undefined
+    const lineRecord = value as Record<string, unknown>
+    const vertices = lineRecord.vertices
+    const dbVertices = Array.isArray(vertices)
+      ? vertices.filter(point => this.isPointLike(point))
+      : []
+
+    const dbBreaks = this.readMLeaderBreaks(lineRecord.breaks)
+    const breakPointIndexes = Array.isArray(lineRecord.breakPointIndexes)
+      ? lineRecord.breakPointIndexes.filter(
+          (item): item is number => typeof item === 'number'
+        )
+      : undefined
+    const leaderLineIndex = this.readNumber(lineRecord, ['leaderLineIndex'])
+
+    return dbVertices.length > 0 || (dbBreaks && dbBreaks.length > 0)
+      ? {
+          vertices: dbVertices,
+          breakPointIndexes,
+          leaderLineIndex,
+          breaks: dbBreaks
+        }
+      : undefined
+  }
+
+  private readMLeaderBreaks(value: unknown): ParsedMLeaderBreak[] | undefined {
+    if (!Array.isArray(value)) return undefined
+
+    const breaks = value
+      .map((item): ParsedMLeaderBreak | undefined => {
+        if (!item || typeof item !== 'object') return undefined
+        const breakRecord = item as Record<string, unknown>
+        const start = this.readPoint(breakRecord, ['start'])
+        const end = this.readPoint(breakRecord, ['end'])
+        const index = this.readNumber(breakRecord, ['index'])
+        if (!start || !end) return undefined
+        const parsed: ParsedMLeaderBreak = { start, end }
+        if (index != null) parsed.index = index
+        return parsed
+      })
+      .filter((item): item is ParsedMLeaderBreak => !!item)
+
+    return breaks.length > 0 ? breaks : undefined
+  }
+
+  private isPointLike(value: unknown): value is AcGePoint3dLike {
+    return (
+      !!value &&
+      typeof value === 'object' &&
+      typeof (value as AcGePoint3dLike).x === 'number' &&
+      typeof (value as AcGePoint3dLike).y === 'number'
+    )
   }
 }

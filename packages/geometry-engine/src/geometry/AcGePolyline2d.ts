@@ -1,6 +1,10 @@
 import { AcGeBox2d, AcGeMatrix2d, AcGePoint2d, AcGePoint3d } from '../math'
+import { FLOAT_TOL } from '../util'
+import { acgeClosedPolygonArea2d } from '../util/AcGePolygonAreaUtil'
 import { AcGeCircArc2d } from './AcGeCircArc2d'
 import { AcGeCurve2d } from './AcGeCurve2d'
+import type { AcGeTessellateOptions } from './AcGeCurveTessellate'
+import { acgeOffsetPolyline2d } from './AcGePolyline2dOffset'
 
 /**
  * The class represents one vertex of the polyline geometry.
@@ -114,6 +118,15 @@ export class AcGePolyline2d<
   }
 
   /**
+   * The area enclosed by this polyline. Open polylines return `0`.
+   */
+  get area(): number {
+    if (!this._closed || this._vertices.length < 3) return 0
+    const points = this.getPoints(128) as AcGePoint2d[]
+    return acgeClosedPolygonArea2d(points)
+  }
+
+  /**
    * Set the polyline to be closed (that is, there is a segment drawn from the last vertex to the first)
    * if 'value' is true. Set the polyline to be open (no segment between the last and first vertices) if
    * 'value' is false.
@@ -205,10 +218,30 @@ export class AcGePolyline2d<
   /**
    * @inheritdoc
    */
-  transform(_matrix: AcGeMatrix2d) {
-    // TODO: implement it
+  transform(matrix: AcGeMatrix2d) {
+    const flipBulge = matrix.determinant() < 0
+
+    this._vertices.forEach(vertex => {
+      const transformedPoint = new AcGePoint2d(vertex).applyMatrix2d(matrix)
+      vertex.x = transformedPoint.x
+      vertex.y = transformedPoint.y
+      if (flipBulge && vertex.bulge != null) {
+        vertex.bulge = -vertex.bulge
+      }
+    })
+
     this._boundingBoxNeedsUpdate = true
     return this
+  }
+
+  /**
+   * Return a deep-cloned copy of this polyline.
+   */
+  clone() {
+    return new AcGePolyline2d<T>(
+      this._vertices.map(vertex => ({ ...vertex })),
+      this._closed
+    )
   }
 
   /**
@@ -262,4 +295,66 @@ export class AcGePolyline2d<
     }
     return points
   }
+
+  /**
+   * Sample this polyline for display using per-bulge chord-height tessellation.
+   *
+   * Straight segments emit vertices only. Each bulge arc chooses its own
+   * segment count from radius and sweep. Shared joints are not duplicated.
+   *
+   * @param options - Chord-height tessellation options forwarded to each arc
+   */
+  tessellate(options?: AcGeTessellateOptions): AcGePoint2d[] {
+    const points: AcGePoint2d[] = []
+    const length = this._vertices.length
+    for (let index = 0; index < length; ++index) {
+      const vertex = this._vertices[index]
+      if (vertex.bulge) {
+        let nextVertex: AcGePolyline2dVertex | null = null
+        if (index < length - 1) {
+          nextVertex = this._vertices[index + 1]
+        } else if (index === length - 1 && this.closed) {
+          nextVertex = this._vertices[0]
+        }
+        if (nextVertex) {
+          const arc = new AcGeCircArc2d(vertex, nextVertex, vertex.bulge)
+          const arcPoints = arc.tessellate(options)
+          for (let i = 0; i < arcPoints.length; ++i) {
+            pushUniquePoint2d(points, arcPoints[i])
+          }
+        }
+      } else {
+        pushUniquePoint2d(points, vertex)
+        if (index === length - 1 && this.closed && points.length > 0) {
+          points.push(points[0].clone())
+        }
+      }
+    }
+    return points
+  }
+
+  /**
+   * Creates offset curves for this polyline in the XY plane.
+   *
+   * @param offsetDist - Signed offset distance in drawing units
+   * @returns Offset polylines; empty when offsetting fails
+   */
+  offset(offsetDist: number): AcGePolyline2d[] {
+    return acgeOffsetPolyline2d(this, offsetDist)
+  }
+}
+
+function pushUniquePoint2d(
+  points: AcGePoint2d[],
+  candidate: { x: number; y: number }
+): void {
+  const last = points[points.length - 1]
+  if (last) {
+    const dx = last.x - candidate.x
+    const dy = last.y - candidate.y
+    if (dx * dx + dy * dy <= FLOAT_TOL * FLOAT_TOL) {
+      return
+    }
+  }
+  points.push(new AcGePoint2d(candidate.x, candidate.y))
 }

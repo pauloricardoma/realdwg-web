@@ -1,16 +1,11 @@
 import {
-  AcGeBox3d,
+  AcGeMatrix3d,
   AcGePoint3d,
   AcGePoint3dLike
 } from '@mlightcad/geometry-engine'
-import {
-  AcGiEntity,
-  AcGiLineArrowStyle,
-  AcGiRenderer
-} from '@mlightcad/graphic-interface'
 
 import { AcDbDxfFiler } from '../../base'
-import { AcDbLine } from '../AcDbLine'
+import { AcDbEntityProperties } from '../AcDbEntityProperties'
 import { AcDbDimension } from './AcDbDimension'
 
 /**
@@ -151,6 +146,76 @@ export class AcDbDiametricDimension extends AcDbDimension {
     return this._leaderLength
   }
 
+  set leaderLength(value: number) {
+    this._leaderLength = value
+  }
+
+  override get properties(): AcDbEntityProperties {
+    const baseProperties = this.getBaseProperties()
+    return {
+      type: this.type,
+      groups: [
+        ...baseProperties.groups,
+        {
+          groupName: 'geometry',
+          properties: [
+            ...this.createPoint3dProperties(
+              'chordPoint',
+              () => this.chordPoint
+            ),
+            ...this.createPoint3dProperties(
+              'farChordPoint',
+              () => this.farChordPoint
+            ),
+            this.createProperty(
+              'leaderLength',
+              'float',
+              () => this.leaderLength,
+              (value: number) => {
+                this.leaderLength = value
+              }
+            ),
+            this.createProperty(
+              'extArcStartAngle',
+              'float',
+              () => this.extArcStartAngle,
+              (value: number) => {
+                this.extArcStartAngle = value
+              }
+            ),
+            this.createProperty(
+              'extArcEndAngle',
+              'float',
+              () => this.extArcEndAngle,
+              (value: number) => {
+                this.extArcEndAngle = value
+              }
+            )
+          ]
+        }
+      ]
+    }
+  }
+
+  /**
+   * @inheritdoc
+   */
+  protected override collectDimensionDefinitionGripPoints() {
+    return [this.chordPoint, this.farChordPoint]
+  }
+
+  /**
+   * @inheritdoc
+   */
+  protected override subTransformBy(matrix: AcGeMatrix3d) {
+    this._chordPoint.applyMatrix4(matrix)
+    this._farChordPoint.applyMatrix4(matrix)
+  }
+
+  protected override getMeasurementPropertyValue() {
+    return this.measurement ?? this.chordPoint.distanceTo(this.farChordPoint)
+  }
+
   /**
    * Gets the geometric extents (bounding box) of this dimension entity.
    *
@@ -162,95 +227,15 @@ export class AcDbDiametricDimension extends AcDbDimension {
    * @inheritdoc
    */
   get geometricExtents() {
-    // TODO: Finish it
-    return new AcGeBox3d()
-  }
-
-  /**
-   * Draws the dimension lines with appropriate arrow styles.
-   *
-   * This method handles the rendering of dimension lines based on the number of
-   * line segments. It applies different arrow styles to the first and last lines
-   * when appropriate, and sorts the lines for proper visual representation.
-   *
-   * @param renderer - The graphics renderer used to draw the dimension lines
-   * @param lines - Array of line entities that make up the dimension
-   * @returns Array of rendered graphics entities
-   * @protected
-   */
-  protected drawLines(renderer: AcGiRenderer, lines: AcDbLine[]) {
-    const results: AcGiEntity[] = []
-    const count = lines.length
-    if (count == 1) {
-      results.push(
-        this.drawLine(renderer, lines[0], {
-          firstArrow: this.firstArrowStyle
-        })
-      )
-    } else if (count == 3) {
-      this.sortLines(lines)
-      results.push(
-        this.drawLine(renderer, lines[0], {
-          firstArrow: this.firstArrowStyle
-        })
-      )
-      results.push(this.drawLine(renderer, lines[1]))
-      results.push(
-        this.drawLine(renderer, lines[2], {
-          firstArrow: this.firstArrowStyle
-        })
-      )
-    } else {
-      lines.forEach(line => {
-        results.push(this.drawLine(renderer, line))
-      })
+    const points = [this.chordPoint, this.farChordPoint]
+    if (this.leaderLength > 0) {
+      const direction = this.farChordPoint.clone().sub(this.chordPoint)
+      if (direction.lengthSq() > 0) {
+        direction.normalize().multiplyScalar(this.leaderLength)
+        points.push(this.farChordPoint.clone().add(direction))
+      }
     }
-    return results
-  }
-
-  /**
-   * Draws a single line with optional arrow styling.
-   *
-   * @param renderer - The graphics renderer used to draw the line
-   * @param line - The line entity to draw
-   * @param lineArrowStyle - Optional arrow style configuration for the line
-   * @returns The rendered graphics entity
-   */
-  private drawLine(
-    renderer: AcGiRenderer,
-    line: AcDbLine,
-    lineArrowStyle?: AcGiLineArrowStyle
-  ) {
-    if (lineArrowStyle) {
-      const points = [line.startPoint, line.endPoint]
-      return renderer.lines(points)
-    } else {
-      return line.worldDraw(renderer)!
-    }
-  }
-
-  /**
-   * Sorts the dimension lines for proper visual representation.
-   *
-   * This method sorts the line segments based on their start and end points to ensure
-   * they are drawn in the correct order for proper dimension visualization.
-   *
-   * @param lines - Array of line entities to sort
-   */
-  private sortLines(lines: AcDbLine[]) {
-    // Function to compare positions of points
-    const comparePoints = (a: AcGePoint3d, b: AcGePoint3d): number => {
-      if (a.x !== b.x) return a.x - b.x
-      if (a.y !== b.y) return a.y - b.y
-      return a.z - b.z
-    }
-
-    // Sort segments based on the start points first, then end points
-    lines.sort((segA, segB) => {
-      const startCompare = comparePoints(segA.startPoint, segB.startPoint)
-      if (startCompare !== 0) return startCompare
-      return comparePoints(segA.endPoint, segB.endPoint)
-    })
+    return this.getGeometricExtentsFromDimBlockOrPoints(points)
   }
 
   /**
@@ -267,6 +252,89 @@ export class AcDbDiametricDimension extends AcDbDimension {
     filer.writeDouble(40, this.leaderLength)
     filer.writeAngle(52, this.extArcStartAngle)
     filer.writeAngle(53, this.extArcEndAngle)
+    return this
+  }
+
+  override dxfInFields(filer: AcDbDxfFiler): this {
+    super.dxfInFields(filer)
+    filer.atSubclassData('AcDbDiametricDimension')
+
+    // AutoCAD DXF: group 10 = one chord end, group 15 = opposite end.
+    // ObjectARX write may also emit group 16 for the far chord.
+    let cx = this._dxfDefinitionPoint.x
+    let cy = this._dxfDefinitionPoint.y
+    let cz = this._dxfDefinitionPoint.z
+    let fx = this.farChordPoint.x
+    let fy = this.farChordPoint.y
+    let fz = this.farChordPoint.z
+    let hasSubDef = false
+    let hasFar = false
+    let startDeg = (this.extArcStartAngle * 180) / Math.PI
+    let endDeg = (this.extArcEndAngle * 180) / Math.PI
+
+    const commit = () => {
+      if (hasFar) {
+        // ObjectARX-style: 15 = chord, 16 = far
+        this.chordPoint = new AcGePoint3d(cx, cy, cz)
+        this.farChordPoint = new AcGePoint3d(fx, fy, fz)
+      } else if (hasSubDef) {
+        // AutoCAD DXF / dxf-json-converter: 10 = chord, 15 = far
+        this.chordPoint = new AcGePoint3d(
+          this._dxfDefinitionPoint.x,
+          this._dxfDefinitionPoint.y,
+          this._dxfDefinitionPoint.z
+        )
+        this.farChordPoint = new AcGePoint3d(cx, cy, cz)
+      }
+      this.extArcStartAngle = (startDeg * Math.PI) / 180
+      this.extArcEndAngle = (endDeg * Math.PI) / 180
+    }
+
+    while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
+      const item = filer.readItem()
+      if (!item) break
+      const code = Number(item.code)
+      const n = Number(item.value)
+      switch (code) {
+        case 15:
+          cx = n
+          hasSubDef = true
+          break
+        case 25:
+          cy = n
+          hasSubDef = true
+          break
+        case 35:
+          cz = n
+          hasSubDef = true
+          break
+        case 16:
+          fx = n
+          hasFar = true
+          break
+        case 26:
+          fy = n
+          hasFar = true
+          break
+        case 36:
+          fz = n
+          hasFar = true
+          break
+        case 40:
+          this.leaderLength = n
+          break
+        case 52:
+          startDeg = n
+          break
+        case 53:
+          endDeg = n
+          break
+        default:
+          break
+      }
+    }
+
+    commit()
     return this
   }
 }

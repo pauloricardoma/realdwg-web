@@ -1,6 +1,7 @@
 {
   "name": "@mlightcad/libredwg-converter",
-  "version": "3.5.15",
+  "version": "3.15.1",
+  "license": "GPL-3.0",
   "type": "module",
   "repository": {
     "type": "git",
@@ -24,12 +25,13 @@
     "README.md",
     "package.json"
   ],
+  "sideEffects": false,
   "main": "./dist/libredwg-converter.umd.cjs",
-  "module": "./dist/libredwg-converter.js",
+  "module": "./lib/index.js",
   "types": "./lib/index.d.ts",
   "exports": {
     "types": "./lib/index.d.ts",
-    "import": "./dist/libredwg-converter.js",
+    "import": "./lib/index.js",
     "require": "./dist/libredwg-converter.umd.cjs"
   },
   "scripts": {
@@ -37,17 +39,19 @@
     "analyze:lib": "vite build --mode analyze --config vite.config.main.ts",
     "analyze:worker": "vite build --mode analyze --config vite.config.worker.ts",
     "clean": "rimraf dist lib tsconfig.tsbuildinfo",
-    "build": "tsc && vite build -c vite.config.main.ts && vite build -c vite.config.worker.ts",
-    "build:main": "vite build -c vite.config.main.ts",
+    "build": "tsc && vite build -c vite.config.main.ts && vite build -c vite.config.worker.ts && node ../../tools/verify-build.mjs verify-build.profile.json",
+    "build:main": "vite build -c vite.config.main.ts && node ../../tools/verify-build.mjs verify-build.profile.json --main-only",
     "build:worker": "vite build -c vite.config.worker.ts",
+    "verify:build": "node ../../tools/verify-build.mjs verify-build.profile.json",
     "lint": "eslint src/",
     "lint:fix": "eslint --fix --quiet src/"
   },
   "dependencies": {
-    "@mlightcad/libredwg-web": "0.6.9"
+    "@mlightcad/libredwg-web": "^0.7.14"
   },
   "devDependencies": {
-    "vite": "^5.2.10"
+    "@mlightcad/data-model": "workspace:*",
+    "vite": "^6.4.3"
   },
   "peerDependencies": {
     "@mlightcad/data-model": "workspace:*"
