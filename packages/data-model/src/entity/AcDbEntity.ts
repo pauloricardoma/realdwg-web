@@ -464,14 +464,20 @@ export abstract class AcDbEntity extends AcDbObject {
   override dxfInFields(filer: AcDbDxfFiler): this {
     super.dxfInFields(filer)
 
-    // Tolerate missing AcDbEntity marker (some writers omit it).
-    if (!filer.atSubclassData('AcDbEntity')) {
+    // Tolerate missing AcDbEntity marker (R12 / some writers omit it).
+    const hadEntityMarker = filer.atSubclassData('AcDbEntity')
+    if (!hadEntityMarker) {
       const next = filer.peekItem()
       if (next && Number(next.code) === 100) {
         // Different subclass — leave for derived class.
         return this
       }
     }
+
+    // Groups 62/420 must be assigned through the color setter. Mutating
+    // `this.color` in place is wrong when a subclass getter returns a clone
+    // (AcDbHatch follows HPCOLOR/CECOLOR until color is explicit).
+    let color: AcCmColor | undefined
 
     while (!filer.atEndOfObject && !filer.atEof && !filer.atExtendedData) {
       const item = filer.readItem()
@@ -498,10 +504,12 @@ export abstract class AcDbEntity extends AcDbObject {
           this.visibility = Number(item.value) === 0
           break
         case 62:
-          this.color.colorIndex = Number(item.value)
+          if (color == null) color = new AcCmColor()
+          color.colorIndex = Number(item.value)
           break
         case 420:
-          this.color.setRGBValue(Number(item.value))
+          if (color == null) color = new AcCmColor()
+          color.setRGBValue(Number(item.value))
           break
         case 370:
           this.lineWeight = Number(item.value)
@@ -529,11 +537,24 @@ export abstract class AcDbEntity extends AcDbObject {
           // Shadow mode / material / plot style / color name — optional.
           break
         default:
-          // Stay resilient to unknown AcDbEntity codes (forward compatible).
-          // Do not push back — that would abort derived subclass readers
-          // (TEXT/MTEXT/DIMENSION/TABLE often carry layout/material extras).
+          if (!hadEntityMarker) {
+            // R12 flat layout: entity-specific groups (10/20/1/…) follow common
+            // fields with no subclass marker. Hand them to the derived reader.
+            filer.pushBackItem(item)
+            if (color != null) {
+              this.color = color
+            }
+            this.applyDxfFileDefaults()
+            return this
+          }
+          // With an AcDbEntity marker, stay resilient to unknown common codes
+          // (forward compatible) until the next subclass marker.
           break
       }
+    }
+
+    if (color != null) {
+      this.color = color
     }
 
     // Omitted group 62 is ByLayer per the DXF spec. Record the default lazily

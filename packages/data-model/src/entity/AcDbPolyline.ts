@@ -11,6 +11,8 @@ import {
   AcGePolyline2d,
   AcGePolyline2dVertex,
   type AcGeTessellateOptions,
+  acgeTransformOcsPointToWcs,
+  acgeTransformWcsPointToOcs,
   AcGeVector3d,
   AcGeVector3dLike
 } from '@mlightcad/geometry-engine'
@@ -325,7 +327,7 @@ export class AcDbPolyline extends AcDbCurve {
    */
   getPoint3dAt(index: number): AcGePoint3d {
     const vertex = this.getPoint2dAt(index)
-    return new AcGePoint3d(vertex.x, vertex.y, this._elevation)
+    return this.ocsPointToWcs(vertex.x, vertex.y)
   }
 
   /**
@@ -341,12 +343,26 @@ export class AcDbPolyline extends AcDbCurve {
    */
   get geometricExtents(): AcGeBox3d {
     const box = this._geo.box
+    // Empty OCS box uses ±Infinity; transforming those through the OCS matrix
+    // yields NaN and can poison spatial indexes downstream.
     if (box.isEmpty()) {
       return new AcGeBox3d()
     }
-    return new AcGeBox3d(
-      { x: box.min.x, y: box.min.y, z: this._elevation },
-      { x: box.max.x, y: box.max.y, z: this._elevation }
+    return new AcGeBox3d().setFromPoints([
+      this.ocsPointToWcs(box.min.x, box.min.y),
+      this.ocsPointToWcs(box.max.x, box.min.y),
+      this.ocsPointToWcs(box.max.x, box.max.y),
+      this.ocsPointToWcs(box.min.x, box.max.y)
+    ])
+  }
+
+  /**
+   * Maps an OCS polyline point (plus elevation) into WCS using {@link normal}.
+   */
+  private ocsPointToWcs(x: number, y: number): AcGePoint3d {
+    return acgeTransformOcsPointToWcs(
+      { x, y, z: this._elevation },
+      this._normal
     )
   }
 
@@ -391,21 +407,23 @@ export class AcDbPolyline extends AcDbCurve {
     const vertexCount = this.numberOfVertices
     const includeMidpoints = this.shouldIncludeSegmentMidpointGrips()
     const segmentCount = includeMidpoints ? this.getSegmentCount() : 0
+    // Grips are exposed in WCS; 2D vertices are stored in OCS.
+    const ocsOffset = acgeTransformWcsPointToOcs(offset, this._normal)
 
     acdbForEachGripIndex(indices, index => {
       if (index < vertexCount) {
-        acdbMovePolyline2dVertexAt(this._geo.vertices, index, offset)
+        acdbMovePolyline2dVertexAt(this._geo.vertices, index, ocsOffset)
         return
       }
       if (!includeMidpoints || index >= vertexCount + segmentCount) {
         return
       }
       const segmentIndex = index - vertexCount
-      acdbMovePolyline2dVertexAt(this._geo.vertices, segmentIndex, offset)
+      acdbMovePolyline2dVertexAt(this._geo.vertices, segmentIndex, ocsOffset)
       acdbMovePolyline2dVertexAt(
         this._geo.vertices,
         (segmentIndex + 1) % vertexCount,
-        offset
+        ocsOffset
       )
     })
     return this
@@ -466,7 +484,9 @@ export class AcDbPolyline extends AcDbCurve {
         { x: 0, y: 0, z: 0 },
         segmentSnaps
       )
-      gripPoints.push(...segmentSnaps)
+      for (const snap of segmentSnaps) {
+        gripPoints.push(this.ocsPointToWcs(snap.x, snap.y))
+      }
     }
   }
 
@@ -496,8 +516,7 @@ export class AcDbPolyline extends AcDbCurve {
     switch (osnapMode) {
       case AcDbOsnapMode.EndPoint:
         for (let index = 0; index < vertexCount; index++) {
-          const vertex = geo.getPointAt(index)
-          snapPoints.push(new AcGePoint3d(vertex.x, vertex.y, elevation))
+          snapPoints.push(this.getPoint3dAt(index))
         }
         break
       case AcDbOsnapMode.MidPoint:
@@ -517,7 +536,9 @@ export class AcDbPolyline extends AcDbCurve {
             pickPoint,
             segmentSnaps
           )
-          candidates.push(...segmentSnaps)
+          for (const snap of segmentSnaps) {
+            candidates.push(this.ocsPointToWcs(snap.x, snap.y))
+          }
         }
         if (osnapMode === AcDbOsnapMode.MidPoint) {
           snapPoints.push(...candidates)
@@ -646,16 +667,17 @@ export class AcDbPolyline extends AcDbCurve {
   }
 
   /**
-   * Thin centerline → `lineStrip`; any renderable width → solid `area`.
+   * Thin centerline → `lineStrip`. Any wide polyline (fill + visibility
+   * centerline stroke) stays unbatched — closed / nearly-closed use
+   * `offsetRing`, open bands use `area` + `lines` grouped together.
    *
    * @internal
    */
   override get directBatchPrimitive() {
     if (!this.hasRenderableWidth()) return 'lineStrip' as const
-    // Closed wide polylines prefer offsetRing when both loops align; leave them
-    // unbatched so capture does not assume a single area() call.
-    if (this.closed) return null
-    return 'area' as const
+    // Wide polylines draw a fill plus a centerline hairline so sub-pixel
+    // world widths stay visible. That is never a single direct-batch payload.
+    return null
   }
 
   /**
@@ -672,7 +694,15 @@ export class AcDbPolyline extends AcDbCurve {
     const centerline = this._geo.tessellate(tessellateOptions)
     const widthProfile = this.createWidthProfile(tessellateOptions)
     if (widthProfile != null) {
-      if (this.closed) {
+      // Closed and nearly-closed open wide polylines (first≈last, common in
+      // DWG exports that omit the closed flag) prefer the index-aligned
+      // offsetRing path. Falling through to multi-quad area fills can nest
+      // overlapping segment quads as holes in AcGeArea2d.buildHierarchy and
+      // drop wall segments non-deterministically.
+      const preferOffsetRing =
+        this.closed ||
+        isNearlyClosedWidePolyline(normalizeCenterline(widthProfile, false))
+      if (preferOffsetRing) {
         const ring = createClosedWidePolylineOffsetRing(widthProfile)
         if (ring != null) {
           const traits = renderer.subEntityTraits
@@ -681,34 +711,71 @@ export class AcDbPolyline extends AcDbCurve {
             patternAngle: 0,
             definitionLines: []
           }
-          const elevation = this.elevation
           return renderer.offsetRing(
-            ring.outer.map(point =>
-              new AcGePoint3d().set(point.x, point.y, elevation)
-            ),
-            ring.inner.map(point =>
-              new AcGePoint3d().set(point.x, point.y, elevation)
-            )
+            ring.outer.map(point => this.ocsPointToWcs(point.x, point.y)),
+            ring.inner.map(point => this.ocsPointToWcs(point.x, point.y))
           )
         }
       }
-      const area = createWidePolylineArea(widthProfile, this.closed)
-      if (area != null) {
+      const areas = createWidePolylineArea(widthProfile, this.closed)
+      if (areas != null) {
         const traits = renderer.subEntityTraits
+        const previousFillType = traits.fillType
         traits.fillType = {
           solidFill: true,
           patternAngle: 0,
           definitionLines: []
         }
-        return renderer.area(area)
+        const entities = areas.map(area => {
+          this.mapAreaLoopsToWcs(area)
+          return renderer.area(area)
+        })
+        // Restore before the hairline stroke — lines must not inherit solid fill.
+        traits.fillType = previousFillType
+        // Hairline centerline so open wide bands stay visible when their
+        // world-space width projects to ≪ 1 device pixel (title blocks).
+        // Closed rings already get a centerline from renderer.offsetRing.
+        const strokePoints = widthProfile.map(sample =>
+          this.ocsPointToWcs(sample.x, sample.y)
+        )
+        // createWidthProfile omits the seam for closed paths; close the stroke.
+        if (this.closed && strokePoints.length >= 2) {
+          strokePoints.push(strokePoints[0])
+        }
+        if (strokePoints.length >= 2) {
+          entities.push(renderer.lines(strokePoints))
+        }
+        return entities.length === 1 ? entities[0] : renderer.group(entities)
       }
     }
 
     const points: AcGePoint3d[] = []
     centerline.forEach(point =>
-      points.push(new AcGePoint3d().set(point.x, point.y, this.elevation))
+      points.push(this.ocsPointToWcs(point.x, point.y))
     )
     return renderer.lines(points)
+  }
+
+  /**
+   * Remaps filled wide-polyline loops from OCS into WCS XY for plan drawing.
+   * Full 3D tipping of area fills is not supported by {@link AcGeArea2d}.
+   */
+  private mapAreaLoopsToWcs(area: AcGeArea2d) {
+    if (
+      this._normal.x === 0 &&
+      this._normal.y === 0 &&
+      this._normal.z === 1
+    ) {
+      return
+    }
+    for (const loop of area.loops) {
+      if (!('vertices' in loop)) continue
+      for (const vertex of loop.vertices) {
+        const wcs = this.ocsPointToWcs(vertex.x, vertex.y)
+        vertex.x = wcs.x
+        vertex.y = wcs.y
+      }
+    }
   }
 
   /**
@@ -762,7 +829,7 @@ export class AcDbPolyline extends AcDbCurve {
    *
    * Used when the target DXF version does not support LWPOLYLINE.
    */
-  dxfOutAs2dPolyline(filer: AcDbDxfFiler, _allXdata = false) {
+  dxfOutAs2dPolyline(filer: AcDbDxfFiler, allXdata = false) {
     filer.writeHandle(5, this.objectId)
     filer.writeObjectId(330, this.ownerId)
     filer.writeObjectId(360, this.extensionDictionary)
@@ -784,6 +851,9 @@ export class AcDbPolyline extends AcDbCurve {
     filer.writeDouble(10, 0)
     filer.writeDouble(20, 0)
     filer.writeDouble(30, this.elevation)
+    if (allXdata) {
+      this.dxfOutXData(filer)
+    }
 
     for (let i = 0; i < this.numberOfVertices; ++i) {
       const vertex = this._geo.vertices[i]
@@ -1153,7 +1223,6 @@ export function acdbOffsetVertexPathAsPolyline(
 
 const WIDTH_EPSILON = 1e-6
 const MITER_LIMIT = 4
-const INNER_TO_OUTER_MAX_RATIO = 0.75
 
 /**
  * A sampled centerline point with local width used for wide polyline rendering.
@@ -1190,7 +1259,7 @@ function createClosedWidePolylineOffsetRing(points: WidePolylinePoint[]): {
 }
 
 /**
- * Builds a renderable filled area for a wide polyline.
+ * Builds renderable filled area(s) for a wide polyline.
  *
  * Open wide polylines are tessellated into per-segment quads so the stroke band
  * follows the centerline without enclosing interior regions when the path bends
@@ -1198,35 +1267,40 @@ function createClosedWidePolylineOffsetRing(points: WidePolylinePoint[]): {
  * inner hole) so the stroke ring does not degenerate into a self-intersecting
  * polygon.
  *
+ * A path that revisits a point (a closed polyline missing the closed flag, or
+ * an open polyline with a retraced/orthogonal corner) is split into subpaths
+ * by {@link splitWidePolylineProfileAtRevisits} so each strokes independently.
+ * Each subpath gets its own {@link AcGeArea2d} rather than sharing one: in
+ * `AcGeArea2d`, only the first loop added is the outer loop and every loop
+ * after it is an inner hole, so pouring a second subpath's loops into the
+ * first subpath's area turned its own outer band into a (wrong) hole and
+ * silently dropped it (#730).
+ *
  * @param points - Centerline samples with per-point widths.
  * @param closed - Whether the source polyline is topologically closed.
- * @returns An area ready for fill rendering, or `null` when no valid area can
- * be constructed.
+ * @returns One area per renderable subpath, or `null` when none could be
+ * constructed.
  */
-function createWidePolylineArea(points: WidePolylinePoint[], closed: boolean) {
+function createWidePolylineArea(
+  points: WidePolylinePoint[],
+  closed: boolean
+): AcGeArea2d[] | null {
   if (points.length < 2) return null
   if (closed) {
-    return createWidePolylineAreaForSingleProfile(points, true)
+    const area = createWidePolylineAreaForSingleProfile(points, true)
+    return area ? [area] : null
   }
 
   const subpaths = splitWidePolylineProfileAtRevisits(points)
-  if (subpaths.length === 1) {
-    return createWidePolylineAreaForSingleProfile(subpaths[0], false)
-  }
-
-  const area = new AcGeArea2d()
-  let added = false
+  const areas: AcGeArea2d[] = []
   for (const subpath of subpaths) {
     const part = createWidePolylineAreaForSingleProfile(subpath, false)
     if (part == null) {
       continue
     }
-    for (const loop of part.loops) {
-      area.add(loop)
-    }
-    added = true
+    areas.push(part)
   }
-  return added ? area : null
+  return areas.length > 0 ? areas : null
 }
 
 function createWidePolylineAreaForSingleProfile(
@@ -1279,6 +1353,11 @@ function createWidePolylineAreaForSingleProfile(
 /**
  * Splits a sampled centerline when it revisits the same point so each subpath
  * can be stroked independently without forming one enclosing fill region.
+ *
+ * When the final sample closes back onto the current segment start (open
+ * polylines that repeat the first vertex instead of setting the closed flag),
+ * emit that span once and stop. Re-emitting the same span as a tail produces
+ * duplicate quads that cancel each other when nested as holes.
  */
 function splitWidePolylineProfileAtRevisits(points: WidePolylinePoint[]) {
   if (points.length < 2) {
@@ -1296,6 +1375,11 @@ function splitWidePolylineProfileAtRevisits(points: WidePolylinePoint[]) {
       const subpath = points.slice(segmentStart, i + 1)
       if (subpath.length >= 2) {
         subpaths.push(subpath)
+      }
+      // Final sample closed back onto the segment start — do not also emit
+      // the identical span as a trailing subpath.
+      if (firstIndex === segmentStart && i === points.length - 1) {
+        return subpaths.length > 0 ? subpaths : [points]
       }
       segmentStart = firstIndex
       firstIndexByKey.clear()
@@ -1320,7 +1404,11 @@ function widePolylinePointKey(point: WidePolylinePoint) {
 }
 
 /**
- * Validates that two offset loops form a thin ring rather than a near-solid slab.
+ * Validates that two offset loops form a stroke ring with positive thickness.
+ *
+ * Large building outlines have inner/outer area ratios near 1.0; an earlier
+ * `inner/outer <= 0.75` gate rejected those thin rings and forced the open-band
+ * quad path, which then dropped segments under area hierarchy nesting.
  */
 function isValidWidePolylineRing(outerArea: number, innerArea: number) {
   const outer = Math.max(outerArea, innerArea)
@@ -1329,10 +1417,7 @@ function isValidWidePolylineRing(outerArea: number, innerArea: number) {
     return false
   }
   const ringArea = outer - inner
-  if (ringArea <= WIDTH_EPSILON) {
-    return false
-  }
-  return inner / outer <= INNER_TO_OUTER_MAX_RATIO
+  return ringArea > WIDTH_EPSILON
 }
 
 /**

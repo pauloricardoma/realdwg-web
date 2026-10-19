@@ -1,6 +1,6 @@
 {
   "name": "@mlightcad/common",
-  "version": "1.15.1",
+  "version": "1.15.11",
   "license": "MIT",
   "type": "module",
   "repository": {
@@ -20,6 +20,7 @@
   "files": [
     "dist",
     "lib",
+    "LICENSE",
     "README.md",
     "package.json"
   ],

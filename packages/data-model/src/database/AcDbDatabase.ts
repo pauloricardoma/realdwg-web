@@ -54,12 +54,15 @@ import { AcDbFormatter } from '../misc/AcDbFormatter'
 import { AcDbLinearUnits } from '../misc/AcDbLinearUnits'
 import { AcDbUnitsValue } from '../misc/AcDbUnitsValue'
 import { AcDbDictionary } from '../object/AcDbDictionary'
+import { AcDbDictionaryVar } from '../object/AcDbDictionaryVar'
 import { AcDbGroup } from '../object/AcDbGroup'
 import { AcDbLayerFilter } from '../object/AcDbLayerFilter'
 import { AcDbLayerIndex } from '../object/AcDbLayerIndex'
 import { AcDbMLeaderStyle } from '../object/AcDbMLeaderStyle'
 import { AcDbMlineStyle } from '../object/AcDbMlineStyle'
+import { AcDbMTextObjectContextData } from '../object/AcDbMTextObjectContextData'
 import { AcDbRasterImageDef } from '../object/AcDbRasterImageDef'
+import { AcDbScale } from '../object/AcDbScale'
 import { AcDbSortentsTable } from '../object/AcDbSortentsTable'
 import { AcDbXrecord } from '../object/AcDbXrecord'
 import { AcLyLayerFilterTree } from '../ly/AcLyLayerFilterTree'
@@ -335,6 +338,11 @@ export class AcDbDatabase extends AcDbObject {
 
   /** Version of the database */
   private _version: AcDbDwgVersion
+  /**
+   * Drawing code page name from `$DWGCODEPAGE` (e.g. `ANSI_1252`, `UTF-8`).
+   * Used when writing pre-R2007 DXF so text encoding matches the header.
+   */
+  private _dwgCodePage: string | undefined
   /** Angle base for the database */
   private _angbase: number
   /** Angle direction for the database */
@@ -416,6 +424,7 @@ export class AcDbDatabase extends AcDbObject {
   /** Nongraphical objects in the database */
   private _objects: {
     readonly dictionary: AcDbDictionary<AcDbDictionary>
+    readonly dictionaryVar: AcDbDictionary<AcDbDictionaryVar>
     readonly group: AcDbDictionary<AcDbGroup>
     readonly imageDefinition: AcDbDictionary<AcDbRasterImageDef>
     readonly layerFilter: AcDbDictionary<AcDbLayerFilter>
@@ -423,9 +432,18 @@ export class AcDbDatabase extends AcDbObject {
     readonly layout: AcDbLayoutDictionary
     readonly mleaderStyle: AcDbDictionary<AcDbMLeaderStyle>
     readonly mlineStyle: AcDbDictionary<AcDbMlineStyle>
+    readonly objectContextData: AcDbDictionary<AcDbMTextObjectContextData>
+    readonly scale: AcDbDictionary<AcDbScale>
     readonly sortentsTable: AcDbDictionary<AcDbSortentsTable>
     readonly xrecord: AcDbDictionary<AcDbXrecord>
   }
+  /** Current annotation scale name (CANNOSCALE), e.g. `"1:100"`. */
+  private _cannoscale: string
+  /**
+   * Whether annotative objects that do not support the current annotation
+   * scale are still displayed (ANNOALLVISIBLE). Defaults to AutoCAD's `1`.
+   */
+  private _annoallvisible: boolean
   /** Current space (model space or paper space) */
   private _currentSpace?: AcDbBlockTableRecord
   /** The maximum handle value in the database, used for generating unique object IDs */
@@ -510,6 +528,7 @@ export class AcDbDatabase extends AcDbObject {
     AcDbDatabase._unsavedDrawingSequence += 1
     this._dwgname = `Drawing${AcDbDatabase._unsavedDrawingSequence}.dwg`
     this._version = new AcDbDwgVersion('AC1014')
+    this._dwgCodePage = undefined
     this._angbase = 0
     this._angdir = 0
     this._aunits = AcDbAngleUnits.DecimalDegrees
@@ -540,6 +559,9 @@ export class AcDbDatabase extends AcDbObject {
     this._lwdisplay = false
     this._tilemode = true
     this._psltscale = true
+    this._cannoscale = '1:1'
+    // AutoCAD initial value of ANNOALLVISIBLE is 1 (show unsupported).
+    this._annoallvisible = true
     this._pdmode = 0
     this._pdsize = 0
     this._osmode = 0
@@ -562,6 +584,7 @@ export class AcDbDatabase extends AcDbObject {
     }
     this._objects = {
       dictionary: new AcDbDictionary(this),
+      dictionaryVar: new AcDbDictionary(this),
       group: new AcDbDictionary(this),
       imageDefinition: new AcDbDictionary(this),
       layerFilter: new AcDbDictionary(this),
@@ -569,6 +592,8 @@ export class AcDbDatabase extends AcDbObject {
       layout: new AcDbLayoutDictionary(this),
       mleaderStyle: new AcDbDictionary(this),
       mlineStyle: new AcDbDictionary(this),
+      objectContextData: new AcDbDictionary(this),
+      scale: new AcDbDictionary(this),
       sortentsTable: new AcDbDictionary(this),
       xrecord: new AcDbDictionary(this)
     }
@@ -793,6 +818,7 @@ export class AcDbDatabase extends AcDbObject {
   getRootDictionaries(): AcDbDictionary[] {
     return [
       this.objects.dictionary,
+      this.objects.dictionaryVar,
       this.objects.group,
       this.objects.imageDefinition,
       this.objects.layerFilter,
@@ -800,6 +826,8 @@ export class AcDbDatabase extends AcDbObject {
       this.objects.layout,
       this.objects.mleaderStyle,
       this.objects.mlineStyle,
+      this.objects.objectContextData,
+      this.objects.scale,
       this.objects.sortentsTable,
       this.objects.xrecord
     ]
@@ -1191,6 +1219,7 @@ export class AcDbDatabase extends AcDbObject {
     }
     for (const dictionary of [
       this._objects.dictionary,
+      this._objects.dictionaryVar,
       this._objects.group,
       this._objects.imageDefinition,
       this._objects.layerFilter,
@@ -1198,6 +1227,8 @@ export class AcDbDatabase extends AcDbObject {
       this._objects.layout,
       this._objects.mleaderStyle,
       this._objects.mlineStyle,
+      this._objects.objectContextData,
+      this._objects.scale,
       this._objects.sortentsTable,
       this._objects.xrecord
     ]) {
@@ -1226,6 +1257,25 @@ export class AcDbDatabase extends AcDbObject {
         for (const entity of object.newIterator()) {
           if (entity.getAttrWithoutException('ownerId') === oldId) {
             entity.ownerId = handle
+          }
+        }
+      }
+      // Same for symbol tables / dictionaries: getIdAt requires ownerId ===
+      // the container's objectId. A DXF *Model_Space with handle "2" displaces
+      // the bootstrap block table (also "2"); without rewriting record
+      // ownerIds, getIdAt("2") returns undefined and layouts fail to open
+      // (https://github.com/mlightcad/realdwg-web/issues/233).
+      if (object instanceof AcDbSymbolTable) {
+        for (const record of object.newIterator(true)) {
+          if (record.getAttrWithoutException('ownerId') === oldId) {
+            record.ownerId = handle
+          }
+        }
+      }
+      if (object instanceof AcDbDictionary) {
+        for (const entry of object.newIterator()) {
+          if (entry.getAttrWithoutException('ownerId') === oldId) {
+            entry.ownerId = handle
           }
         }
       }
@@ -1540,6 +1590,25 @@ export class AcDbDatabase extends AcDbObject {
   }
 
   /**
+   * Gets the drawing code page name (`$DWGCODEPAGE`), when known.
+   *
+   * Populated from the HEADER when a DXF/DWG is read. Used by {@link dxfOut}
+   * for pre-R2007 targets; R2007+ always writes `UTF-8`.
+   */
+  get dwgCodePage(): string | undefined {
+    return this._dwgCodePage
+  }
+
+  /**
+   * Sets the drawing code page name written as `$DWGCODEPAGE` for legacy DXF.
+   *
+   * @param value - Code page token such as `ANSI_1252` or `ANSI_936`
+   */
+  set dwgCodePage(value: string | undefined) {
+    this._dwgCodePage = value?.trim() ? value.trim() : undefined
+  }
+
+  /**
    * Gets the drawing-units value for automatic scaling of blocks, images, or xrefs.
    *
    * This is the current INSUNITS value for the database.
@@ -1653,6 +1722,28 @@ export class AcDbDatabase extends AcDbObject {
         this._ltscale = nextValue
       }
     )
+  }
+
+  /**
+   * Current annotation scale name (`CANNOSCALE`), e.g. `"1:100"`.
+   */
+  get cannoscale(): string {
+    return this._cannoscale
+  }
+  set cannoscale(value: string) {
+    this._cannoscale = value || '1:1'
+  }
+
+  /**
+   * When `true`, annotative objects that do not support the current annotation
+   * scale are still displayed (`ANNOALLVISIBLE`). Defaults to `true`, matching
+   * AutoCAD's initial value.
+   */
+  get annoallvisible(): boolean {
+    return this._annoallvisible
+  }
+  set annoallvisible(value: boolean) {
+    this._annoallvisible = value
   }
 
   /**
@@ -2349,15 +2440,16 @@ export class AcDbDatabase extends AcDbObject {
   }
 
   /**
-   * Reads drawing data from a string or ArrayBuffer.
+   * Reads drawing data from a string, ArrayBuffer, or typed-array view.
    *
    * This method parses the provided data and populates the database with
    * the resulting entities, tables, and objects. The method supports
    * both DXF and DWG file formats.
    *
-   * @param data - The drawing data as a string or ArrayBuffer
-   *   - For DXF files: Pass a string containing the DXF content
-   *   - For DWG files: Pass an ArrayBuffer instance containing the binary DWG data
+   * @param data - The drawing data as a string, ArrayBuffer, or ArrayBufferView
+   *   - For DXF files: Pass a string containing the DXF content, or bytes as
+   *     an ArrayBuffer / Uint8Array (e.g. from `fetch` / `File` / `fs.readFile`)
+   *   - For DWG files: Pass an ArrayBuffer or Uint8Array of the binary DWG data
    * @param options - Options for reading the database
    * @param fileType - The type of file being read (defaults to DXF)
    *
@@ -2367,13 +2459,19 @@ export class AcDbDatabase extends AcDbObject {
    * const database = new AcDbDatabase();
    * await database.read(dxfString, { readOnly: true }, AcDbFileType.DXF);
    *
+   * // Reading a DXF file (Uint8Array / ArrayBuffer)
+   * await database.read(
+   *   new TextEncoder().encode(dxfString),
+   *   { readOnly: true },
+   *   AcDbFileType.DXF
+   * );
+   *
    * // Reading a DWG file (ArrayBuffer)
-   * const database = new AcDbDatabase();
    * await database.read(dwgArrayBuffer, { readOnly: true }, AcDbFileType.DWG);
    * ```
    */
   async read(
-    data: ArrayBuffer,
+    data: string | ArrayBuffer | ArrayBufferView,
     options: AcDbOpenDatabaseOptions,
     fileType: AcDbConverterType = AcDbFileType.DXF
   ) {
@@ -2382,6 +2480,32 @@ export class AcDbDatabase extends AcDbObject {
       throw new Error(
         `Database converter for file type '${fileType}' isn't registered and can can't read this file!`
       )
+
+    let buffer: ArrayBuffer
+    if (typeof data === 'string') {
+      const encoded = new TextEncoder().encode(data)
+      buffer = encoded.buffer.slice(
+        encoded.byteOffset,
+        encoded.byteOffset + encoded.byteLength
+      ) as ArrayBuffer
+    } else if (data instanceof ArrayBuffer) {
+      buffer = data
+    } else if (ArrayBuffer.isView(data)) {
+      // Copy the exact view range — Node Buffer / sliced Uint8Array may share
+      // a larger underlying ArrayBuffer.
+      buffer = data.buffer.slice(
+        data.byteOffset,
+        data.byteOffset + data.byteLength
+      ) as ArrayBuffer
+    } else {
+      const openError = new AcDbOpenDatabaseError(
+        'AcDbDatabase.read expects a string, ArrayBuffer, or ArrayBufferView',
+        'unknown'
+      )
+      this._lastOpenError = openError
+      this.events.openFailed.dispatch({ database: this, error: openError })
+      throw openError
+    }
 
     this.clear()
     this._lastOpenError = null
@@ -2398,7 +2522,7 @@ export class AcDbDatabase extends AcDbObject {
     acdbAssignWorkingDatabase(this)
 
     try {
-      await converter.read(data, this, {
+      await converter.read(buffer, this, {
         minimumChunkSize: (options && options.minimumChunkSize) || 10,
         progress: this.createConversionProgressHandler(),
         timeout: options?.timeout,
@@ -2908,9 +3032,16 @@ export class AcDbDatabase extends AcDbObject {
     filer.writeString(1, filer.version?.name ?? this.version.name)
     filer.writeString(9, '$HANDSEED')
     filer.writeString(5, filer.nextHandle.toString(16).toUpperCase())
+    filer.writeString(9, '$DWGCODEPAGE')
     if (filer.capabilities.supportsUtf8CodePage) {
-      filer.writeString(9, '$DWGCODEPAGE')
       filer.writeString(3, 'UTF-8')
+    } else {
+      // Pre-R2007: declare a legacy code page. Non-ASCII text is written as
+      // `\U+nnnn` escapes (see AcDbDxfFiler) so the ASCII payload matches.
+      const name = this._dwgCodePage
+      const legacy =
+        name && !/^utf-?8$/i.test(name) ? name : 'ANSI_1252'
+      filer.writeString(3, legacy)
     }
     filer.writeString(9, '$INSUNITS')
     filer.writeInt16(70, this.insunits)
@@ -3536,8 +3667,13 @@ export class AcDbDatabase extends AcDbObject {
     this._objects.layerIndex.removeAll()
     this._objects.mleaderStyle.removeAll()
     this._objects.mlineStyle.removeAll()
+    this._objects.objectContextData.removeAll()
+    this._objects.scale.removeAll()
+    this._objects.dictionaryVar.removeAll()
     this._objects.sortentsTable.removeAll()
     this._objects.xrecord.removeAll()
+    this._cannoscale = '1:1'
+    this._annoallvisible = true
     this._layerFilters = new AcLyLayerFilterTree()
     this._currentSpace = undefined
     this._extents.makeEmpty()

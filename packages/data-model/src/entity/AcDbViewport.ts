@@ -14,6 +14,7 @@ import {
 } from '@mlightcad/graphic-interface'
 
 import { AcDbDxfFiler } from '../base/AcDbDxfFiler'
+import { acdbGetViewportAnnotationScale } from '../misc/AcDbAnnotationScale'
 import { AcDbEntity } from './AcDbEntity'
 import { acdbForEachGripIndex } from './AcDbGripHelpers'
 import { acdbIntersectPrimitivesFromPointPath } from './AcDbIntersectHelpers'
@@ -748,6 +749,23 @@ export class AcDbViewport extends AcDbEntity {
     viewport.viewCenter = this.viewCenter
     viewport.viewTarget = this.viewTarget
     viewport.viewTwistAngle = this.viewTwistAngle
+    viewport.frozenLayerIds = this.frozenLayerIds
+    const frozenLayers: string[] = []
+    const layerTable = this.database?.tables.layerTable
+    if (layerTable) {
+      for (const id of this.frozenLayerIds) {
+        const layer = layerTable.getIdAt(id)
+        if (layer) {
+          frozenLayers.push(layer.name)
+        }
+      }
+    }
+    viewport.frozenLayers = frozenLayers
+    const annotationScale = acdbGetViewportAnnotationScale(this)
+    if (annotationScale) {
+      viewport.annotationScaleName = annotationScale.scaleName
+      viewport.annotationScaleFactor = annotationScale.scaleFactor
+    }
     return viewport
   }
 
@@ -834,8 +852,8 @@ export class AcDbViewport extends AcDbEntity {
     super.dxfOutFields(filer)
     filer.writeSubclassMarker('AcDbViewport')
     filer.writePoint3d(10, this.centerPoint)
-    filer.writeDouble(40, this.height)
-    filer.writeDouble(41, this.width)
+    filer.writeDouble(40, this.width)
+    filer.writeDouble(41, this.height)
     filer.writePoint3d(12, this.viewCenter)
     filer.writePoint3d(13, this.snapBase)
     filer.writePoint3d(14, this.snapSpacing)
@@ -1016,10 +1034,10 @@ export class AcDbViewport extends AcDbEntity {
           vtz = n
           break
         case 40:
-          this.height = n
+          this.width = n
           break
         case 41:
-          this.width = n
+          this.height = n
           break
         case 42:
           this.perspectiveLensLength = n

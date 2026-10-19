@@ -83,6 +83,26 @@ describe('AcDbViewport', () => {
     expect(giViewport.viewCenter).toMatchObject({ x: 1, y: 1, z: 0 })
     expect(giViewport.viewTarget).toMatchObject({ x: 0, y: 0, z: 0 })
     expect(giViewport.viewTwistAngle).toBe(0)
+    expect(giViewport.frozenLayerIds).toEqual([])
+    expect(giViewport.frozenLayers).toEqual([])
+  })
+
+  it('passes frozen layer ids and resolved names through toGiViewport', () => {
+    const db = createDb()
+    const layer = new AcDbLayerTableRecord({ name: 'DetailA' })
+    db.tables.layerTable.add(layer)
+
+    const viewport = new AcDbViewport()
+    viewport.frozenLayerIds = [layer.objectId, 'missing-handle']
+    db.tables.blockTable.modelSpace.appendEntity(viewport)
+
+    const giViewport = viewport.toGiViewport()
+    expect(giViewport.frozenLayerIds).toEqual([layer.objectId, 'missing-handle'])
+    expect(giViewport.frozenLayers).toEqual(['DetailA'])
+
+    const cloned = giViewport.clone()
+    expect(cloned.frozenLayerIds).toEqual(giViewport.frozenLayerIds)
+    expect(cloned.frozenLayers).toEqual(['DetailA'])
   })
 
   it('maps DCS view center through viewTarget into WCS viewBox', () => {
@@ -291,11 +311,39 @@ describe('AcDbViewport', () => {
 
     expect(out).toContain('100\nAcDbViewport\n')
     expect(out).toContain('10\n1\n20\n2\n30\n3\n')
-    expect(out).toContain('40\n22\n')
-    expect(out).toContain('41\n11\n')
+    // DXF VIEWPORT: group 40 = width, group 41 = height (paper space units)
+    expect(out).toContain('40\n11\n')
+    expect(out).toContain('41\n22\n')
     expect(out).toContain('12\n4\n22\n5\n32\n6\n')
     expect(out).toContain('45\n33\n')
     expect(out).toContain('69\n4\n')
+  })
+
+  it('reads DXF group 40 as width and 41 as height', () => {
+    createDb()
+    const groups = [
+      '100',
+      'AcDbEntity',
+      '8',
+      '0',
+      '100',
+      'AcDbViewport',
+      '10',
+      0,
+      '20',
+      0,
+      '30',
+      0,
+      '40',
+      433.5,
+      '41',
+      354.25
+    ]
+    const viewport = new AcDbViewport()
+    viewport.dxfIn(AcDbDxfFiler.fromString(groups.join('\n') + '\n'))
+
+    expect(viewport.width).toBe(433.5)
+    expect(viewport.height).toBe(354.25)
   })
 
   it('returns center and corner grip points', () => {
